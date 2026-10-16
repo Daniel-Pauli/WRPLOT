@@ -13,6 +13,72 @@ import matplotlib.pyplot as plt
 from svgpath2mpl import parse_path
 from astropy.convolution import Gaussian1DKernel, Box1DKernel, convolve
 from tqdm import tqdm
+from numba import njit
+
+
+@njit(cache=True)
+def _convol_gauss_kernel(x, y, sigma, half_width):
+    """Discrete Gaussian convolution on an irregular but sorted wavelength grid."""
+    n = len(x)
+    out = np.empty(n)
+    for i in range(n):
+        mu = x[i]
+        # Match command_cut strict inequalities: lo < x < hi
+        lo = np.searchsorted(x, mu - half_width, side="right")
+        hi = np.searchsorted(x, mu + half_width, side="left")
+        s = 0.0
+        wsum = 0.0
+        for j in range(lo, hi):
+            u = (x[j] - mu) / sigma
+            w = np.exp(-0.5 * u * u)
+            s += y[j] * w
+            wsum += w
+        out[i] = s / wsum
+    return out
+
+
+@njit(cache=True)
+def _convol_box_kernel(x, y, width):
+    """Discrete box convolution on an irregular but sorted wavelength grid."""
+    n = len(x)
+    out = np.empty(n)
+    for i in range(n):
+        mu = x[i]
+        lo = np.searchsorted(x, mu - width, side="right")
+        hi = np.searchsorted(x, mu + width, side="left")
+        s = 0.0
+        for j in range(lo, hi):
+            s += y[j]
+        out[i] = s / (hi - lo)
+    return out
+
+
+@njit(cache=True)
+def _convol_rot_kernel(x, y, vsini_kms, beta):
+    """
+    Discrete rotational-broadening convolution on an irregular but sorted grid.
+
+    Kernel width scales with wavelength (Δλ = vsini/c * λ), matching command_convol.
+    """
+    n = len(x)
+    out = np.empty(n)
+    vsini = vsini_kms / 299792.458
+    for i in range(n):
+        mu = x[i]
+        half = vsini * mu
+        lo = np.searchsorted(x, mu - half, side="right")
+        hi = np.searchsorted(x, mu + half, side="left")
+        c1 = 2.0 * (1.0 - beta) / (np.pi * half * (1.0 - beta / 3.0))
+        c2 = beta / (2.0 * half * (1.0 - beta / 3.0))
+        s = 0.0
+        wsum = 0.0
+        for j in range(lo, hi):
+            z2 = ((mu - x[j]) / half) ** 2
+            w = c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)
+            s += y[j] * w
+            wsum += w
+        out[i] = s / wsum
+    return out
 
 class wrplotter:
         
@@ -966,14 +1032,23 @@ class wrplotter:
                 new_y.append(np.dot(temp_data[1],rot_prof/sum(rot_prof)))
             return np.array([dataset[0],new_y])
             
-    def command_convol_fast(self, dataset, shape="gaussian", value=0, beta=0):
+    def command_convol_fast(self, dataset, shape="gaussian", value=0, beta=0,
+                            precision=1e-4, allow_fft=False):
         """    
-        Convolution of a dataset with a given function/shape.
-        
+        Fast convolution agreeing with ``command_convol`` to within ``precision``.
+
+        By default this always uses the exact discrete, per-point weighted sums
+        as ``command_convol`` (numba-accelerated kernel path). An optional FFT
+        path exists for speed on uniform grids, but it is **opt-in** via
+        ``allow_fft=True`` because FFT assumes uniform Δλ and a single fixed
+        kernel — conditions that real spectra and rotational broadening often
+        violate.
+
         Parameters
         ----------
         dataset: np.array or list or int
-            Dataset that should be modified.
+            Dataset that should be modified. If the wavelength axis is not
+            sorted ascending, it is sorted (with flux) before convolution.
         shape: str default: gaussian
             Possible options: "gauss" or gaussian", "box" or "kasten", "rot" or "rotation"
         value: float default: 0
@@ -984,6 +1059,21 @@ class wrplotter:
         beta: float default: 0
             This value is only needed for the rotational broadening and is the Limb darkening coefficient.
             By default limb-darkening is ignored.
+        precision: float or None default: 1e-4
+            Maximum absolute flux difference allowed relative to ``command_convol``.
+            Default ``1e-4`` is a typical “scientifically indistinguishable”
+            tolerance. Pass ``None`` (or ``<= 0``) to request a fully exact
+            discrete match (machine precision). Values tighter than ~1e-10 also
+            keep the kernel path even if ``allow_fft=True``.
+        allow_fft: bool default: False
+            If False (default), always use the exact kernel path.
+            If True, FFT may be used **only when all** of the following hold:
+              - ``precision`` is set and ``>= 1e-10`` (not forcing exact),
+              - ``shape`` is Gaussian or box (not rotation; rot width ∝ λ),
+              - the wavelength grid is mathematically uniform.
+            FFT is faster but can disagree with ``command_convol`` on irregular
+            sampling; leave this False unless you know the grid is uniform and
+            accept the ``precision`` tolerance.
             
         Returns
         -------
@@ -991,44 +1081,62 @@ class wrplotter:
         """
         if value == 0:
             return dataset
-    
-        x, y = np.array(dataset[0]), np.array(dataset[1])
-        dx = np.mean(np.diff(x))
+
+        x = np.asarray(dataset[0], dtype=float).copy()
+        y = np.asarray(dataset[1], dtype=float).copy()
+        if x.size > 1 and np.any(x[1:] < x[:-1]):
+            order = np.argsort(x, kind="mergesort")
+            x = x[order]
+            y = y[order]
+
         shape = shape.lower()
-    
-        # ---- Build kernel ----
-        if shape in ["gauss", "gaussian"]:
+        force_exact = precision is None or precision <= 0
+
+        # FFT is opt-in (allow_fft=False by default). Even when enabled it is
+        # only safe for constant-width kernels on a uniform grid, and only when
+        # the caller does not demand a fully exact match via precision.
+        use_fft = (
+            allow_fft
+            and not force_exact
+            and shape in ("gauss", "gaussian", "box", "kasten")
+            and x.size > 1
+            and np.allclose(np.diff(x), np.diff(x)[0], rtol=1e-9, atol=0.0)
+            and precision >= 1e-10
+        )
+
+        if use_fft:
+            y_new = self._convol_fft_uniform(x, y, shape, value, beta)
+        elif shape in ("gauss", "gaussian"):
             sigma = value / 2.354820045
-            half_width = int(5 * sigma / dx)
-            xk = np.linspace(-half_width * dx, half_width * dx, 2 * half_width + 1)
-            kernel = self.gauss(xk, 0, sigma)
-        elif shape in ["box", "kasten"]:
-            half_width = int(value / dx)
-            xk = np.linspace(-half_width * dx, half_width * dx, 2 * half_width + 1)
-            kernel = self.box(xk, 0, value)
-        elif shape in ["rot", "rotation"]:
-            mu0 = np.median(x)
-            delta = value / 299792.458 * mu0
-            half_width = int(delta / dx)
-            xk = np.linspace(-half_width * dx, half_width * dx, 2 * half_width + 1)
-            kernel = self.rot(mu0 + xk, mu0, value, beta)
+            y_new = _convol_gauss_kernel(x, y, sigma, 4.5 * sigma)
+        elif shape in ("box", "kasten"):
+            y_new = _convol_box_kernel(x, y, value)
+        elif shape in ("rot", "rotation"):
+            y_new = _convol_rot_kernel(x, y, value, beta)
         else:
             raise ValueError(f"Unknown convolution shape: {shape}")
-    
-        kernel /= np.sum(kernel)
-    
-        # ---- Edge-safe convolution ----
-        pad_width = len(kernel) // 2
-        # You can change the padding strategy here:
-        y_padded = np.pad(y, pad_width, mode="edge")  # replicate edge values
-    
-        y_conv = fftconvolve(y_padded, kernel, mode="same")
-    
-        # remove padding
-        y_new = y_conv[pad_width:-pad_width]
-    
+
         return np.array([x, y_new])
-        
+
+    def _convol_fft_uniform(self, x, y, shape, value, beta=0):
+        """FFT convolution for Gaussian/box on a verified uniform wavelength grid."""
+        dx = float(x[1] - x[0])
+        if shape in ("gauss", "gaussian"):
+            sigma = value / 2.354820045
+            half_width = max(int(np.ceil(4.5 * sigma / dx)), 1)
+            xk = dx * np.arange(-half_width, half_width + 1)
+            kernel = np.exp(-0.5 * ((xk / sigma) ** 2))
+        else:  # box / kasten
+            half_width = max(int(np.floor(value / dx)), 0)
+            xk = dx * np.arange(-half_width, half_width + 1)
+            kernel = ((xk > -value) & (xk < value)).astype(float)
+            if kernel.sum() == 0:
+                kernel = np.array([1.0])
+        kernel /= kernel.sum()
+        pad = len(kernel) // 2
+        y_padded = np.pad(y, pad, mode="edge")
+        return fftconvolve(y_padded, kernel, mode="valid")
+
     def command_write(self,file,dataset,**kwargs):
         """    
         Saves a dataset to a textfile.
