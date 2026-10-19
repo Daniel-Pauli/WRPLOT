@@ -114,6 +114,41 @@ def _convol_rot_kernel(x, y, d_angstrom, beta):
     return out
 
 
+@njit(cache=True)
+def _convol_rot_vsini_kernel(x, y, vsini_kms, beta):
+    """
+    Discrete rotational broadening with wavelength-scaling vsini [km/s].
+
+    Kernel half-width Δλ = (vsini/c)·λ at each point (not WRPLOT's fixed D).
+    Limb-darkening form matches the historical Python ``command_convol`` API.
+    Weights include local spacing (CONVADD-style).
+    """
+    n = len(x)
+    out = np.empty(n)
+    vsini = vsini_kms / 299792.458
+    for i in range(n):
+        mu = x[i]
+        half = vsini * mu
+        if half <= 0.0:
+            out[i] = y[i]
+            continue
+        lo = np.searchsorted(x, mu - half, side="right")
+        hi = np.searchsorted(x, mu + half, side="left")
+        c1 = 2.0 * (1.0 - beta) / (np.pi * half * (1.0 - beta / 3.0))
+        c2 = beta / (2.0 * half * (1.0 - beta / 3.0))
+        s = 0.0
+        wsum = 0.0
+        for j in range(lo, hi):
+            z2 = ((mu - x[j]) / half) ** 2
+            if z2 >= 1.0:
+                continue
+            w = (c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)) * _local_spacing(x, j, n)
+            s += y[j] * w
+            wsum += w
+        out[i] = s / wsum if wsum != 0.0 else 0.0
+    return out
+
+
 def _local_spacing_python(x, k, n):
     """CONVADD local |Δx| weight (pure Python)."""
     if n < 2:
@@ -197,8 +232,8 @@ def _convol_rot_python(x, y, d_angstrom, beta):
     """
     Pure-Python rotational convolution (1:1 CONVEX loop for CHAR='R').
 
-    Used by ``command_convol_original``; ``command_convol`` uses the numba twin
-    ``_convol_rot_kernel``.
+    Used by ``command_convol_original``; ``command_convol(..., d_angstrom=...)``
+    uses the numba twin ``_convol_rot_kernel``.
     """
     twobypi = 0.6366197723675814  # 2/π
     beta = float(beta)
@@ -208,6 +243,41 @@ def _convol_rot_python(x, y, d_angstrom, beta):
         return twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
 
     return _convol_convex_python(x, y, float(d_angstrom), 1.0, kernel)
+
+
+def _convol_rot_vsini_python(x, y, vsini_kms, beta):
+    """
+    Pure-Python twin of ``_convol_rot_vsini_kernel`` (vsini [km/s], Δλ ∝ λ).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = len(x)
+    out = np.empty(n)
+    vsini = float(vsini_kms) / 299792.458
+    beta = float(beta)
+    for i in range(n):
+        mu = x[i]
+        half = vsini * mu
+        if half <= 0.0:
+            out[i] = y[i]
+            continue
+        lo = np.searchsorted(x, mu - half, side="right")
+        hi = np.searchsorted(x, mu + half, side="left")
+        c1 = 2.0 * (1.0 - beta) / (np.pi * half * (1.0 - beta / 3.0))
+        c2 = beta / (2.0 * half * (1.0 - beta / 3.0))
+        s = 0.0
+        wsum = 0.0
+        for j in range(lo, hi):
+            z2 = ((mu - x[j]) / half) ** 2
+            if z2 >= 1.0:
+                continue
+            w = (c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)) * _local_spacing_python(
+                x, j, n
+            )
+            s += y[j] * w
+            wsum += w
+        out[i] = s / wsum if wsum != 0.0 else 0.0
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1372,7 +1442,8 @@ class wrplotter:
             If shape == "box", half-width of the box [Å].
             If shape == "rot", Δλ_max [Å] (WRPLOT ``D``) — fixed wavelength
             half-width of the Unsoeld rotation profile (not vsini in km/s).
-            Convert via Δλ = λ · v_sin_i / c if needed.
+            For wavelength-scaling vsini [km/s] use
+            ``command_convol(..., shape="rot", value=vsini)`` instead.
         beta: float default: 0
             Limb-darkening coefficient β for rotational broadening
             (WRPLOT ``BETA``). Ignored for gauss/box.
@@ -1403,15 +1474,19 @@ class wrplotter:
         return np.array([x, y_new])
             
     def command_convol(self, dataset, shape="gaussian", value=0, beta=0,
-                            precision=1e-4, allow_fft=False):
+                            precision=1e-4, allow_fft=False, d_angstrom=None):
         """    
-        Fast convolution agreeing with ``command_convol_original`` to within ``precision``.
+        Fast convolution (numba kernels with WRPLOT-style kernel×Δx weights).
 
-        By default this always uses the exact discrete, per-point sums of
-        ``command_convol_original`` (numba kernels with WRPLOT-style kernel×Δx
-        weights). For ``shape="rot"`` the kernel is the Unsoeld profile with
-        fixed Δλ_max [Å] (same as WRPLOT). An optional FFT path exists for
-        speed on uniform grids, but it is **opt-in** via ``allow_fft=True``.
+        For Gaussian / box, results agree with ``command_convol_original`` to
+        within ``precision``. For ``shape="rot"``, the default API takes
+        **vsini [km/s]** with wavelength-scaling Δλ = λ·v/c (historical Python
+        behaviour, different from WRPLOT). Pass ``d_angstrom=D`` to use
+        WRPLOT's fixed-Δλ Unsoeld kernel instead (same as
+        ``command_convol_original(..., shape="rot", value=D)``).
+
+        An optional FFT path exists for speed on uniform grids, but it is
+        **opt-in** via ``allow_fft=True`` (Gaussian / box only).
 
         Parameters
         ----------
@@ -1424,28 +1499,40 @@ class wrplotter:
             Kernel width parameter:
             If shape == "gauss", FWHM [Å].
             If shape == "box", half-width of the box [Å].
-            If shape == "rot", Δλ_max [Å] (WRPLOT ``D``), not vsini in km/s.
+            If shape == "rot" and ``d_angstrom`` is None, projected rotational
+            velocity vsini [km/s] (Δλ ∝ λ). Ignored for rot when
+            ``d_angstrom`` is set.
         beta: float default: 0
             Limb-darkening coefficient β for rotational broadening.
         precision: float or None default: 1e-4
-            Maximum absolute flux difference allowed relative to ``command_convol_original``.
-            Default ``1e-4`` is a typical “scientifically indistinguishable”
-            tolerance. Pass ``None`` (or ``<= 0``) to request a fully exact
-            discrete match (machine precision). Values tighter than ~1e-10 also
-            keep the kernel path even if ``allow_fft=True``.
+            Maximum absolute flux difference allowed relative to
+            ``command_convol_original`` (gauss/box, or rot with
+            ``d_angstrom``). Pass ``None`` (or ``<= 0``) for a fully exact
+            discrete match. Values tighter than ~1e-10 also keep the kernel
+            path even if ``allow_fft=True``.
         allow_fft: bool default: False
             If False (default), always use the exact kernel path.
             If True, FFT may be used **only when all** of the following hold:
               - ``precision`` is set and ``>= 1e-10`` (not forcing exact),
-              - ``shape`` is Gaussian or box (not rotation; fixed-Δλ rot is
-                FFT-safe on a uniform grid but still excluded here),
+              - ``shape`` is Gaussian or box (not rotation),
               - the wavelength grid is mathematically uniform.
+        d_angstrom: float or None default: None
+            If set (and shape is rot), use WRPLOT fixed half-width Δλ_max [Å]
+            instead of vsini. Required for bit-level comparison to
+            ``command_convol_original`` / Fortran CONVOL ROT.
             
         Returns
         -------
         The modified dataset. 
         """
-        if value == 0:
+        shape = shape.lower()
+        use_wrplot_rot = (
+            shape in ("rot", "rotation") and d_angstrom is not None
+        )
+        if use_wrplot_rot:
+            if d_angstrom == 0:
+                return dataset
+        elif value == 0:
             return dataset
 
         x = np.asarray(dataset[0], dtype=float).copy()
@@ -1455,7 +1542,6 @@ class wrplotter:
             x = x[order]
             y = y[order]
 
-        shape = shape.lower()
         force_exact = precision is None or precision <= 0
 
         # FFT is opt-in (allow_fft=False by default). Even when enabled it is
@@ -1478,7 +1564,10 @@ class wrplotter:
         elif shape in ("box", "kasten"):
             y_new = _convol_box_kernel(x, y, value)
         elif shape in ("rot", "rotation"):
-            y_new = _convol_rot_kernel(x, y, value, beta)
+            if use_wrplot_rot:
+                y_new = _convol_rot_kernel(x, y, float(d_angstrom), beta)
+            else:
+                y_new = _convol_rot_vsini_kernel(x, y, value, beta)
         else:
             raise ValueError(f"Unknown convolution shape: {shape}")
 

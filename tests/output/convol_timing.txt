@@ -2,14 +2,15 @@ CONVOL timing (N=8001 pts, continuum_flat.dat)
 ==============================================
 
 slow = command_convol_original (pure-Python CONVEX/CONVADD)
-fast = command_convol (numba kernels)
+fast = command_convol (numba; rot uses d_angstrom= for WRPLOT parity)
+default command_convol(..., 'rot', vsini_kms) uses Δλ∝λ (not WRPLOT D)
 speedup = t(slow) / t(fast)  for that case
 
 case                   slow      fast  speedup  max|d| vs WRPLOT
 ----------------  ---------  --------  -------  ----------------
-GAUSS FWHM=2.0    937.30 ms   6.51 ms   143.9x          4.99e-11
-BOX / KASTEN=2.0  398.59 ms  996.1 us   400.1x          4.94e-11
-ROT Δλ=2.5 β=0.6  745.05 ms   3.24 ms   229.9x          4.96e-11
-GAUSS FWHM=0.5    253.14 ms   2.12 ms   119.3x                 —
-BOX half=1.0      205.91 ms  803.8 us   256.2x                 —
-ROT Δλ=2.5 β=0    765.62 ms   3.25 ms   235.5x                 —
+GAUSS FWHM=2.0    943.67 ms   6.32 ms   149.3x          4.99e-11
+BOX / KASTEN=2.0  373.44 ms  989.0 us   377.6x          4.94e-11
+ROT Δλ=2.5 β=0.6  730.74 ms   3.23 ms   226.3x          4.96e-11
+GAUSS FWHM=0.5    254.52 ms   2.09 ms   121.7x                 —
+BOX half=1.0      205.80 ms  791.9 us   259.9x                 —
+ROT Δλ=2.5 β=0    774.65 ms   3.29 ms   235.7x                 —

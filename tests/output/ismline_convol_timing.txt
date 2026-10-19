@@ -9,6 +9,6 @@ speedup = t(slow+slow) / t(case)
 
 case               time  speedup  max|d| vs WRPLOT
 -------------  --------  -------  ----------------
-slow+slow      13.585 s     1.0x          7.10e-07
-fast+fast      22.07 ms   615.6x          7.10e-07
-fast_cut+fast  22.19 ms   612.1x          7.10e-07
+slow+slow      13.566 s     1.0x          7.10e-07
+fast+fast      21.77 ms   623.1x          7.10e-07
+fast_cut+fast  21.41 ms   633.7x          7.10e-07

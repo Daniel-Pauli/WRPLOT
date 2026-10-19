@@ -29,6 +29,7 @@ from helpers import (
     synthetic_absorption,
     time_call,
 )
+from wrplot import _convol_rot_vsini_python
 
 
 class TestConvolAgreement(unittest.TestCase):
@@ -38,7 +39,8 @@ class TestConvolAgreement(unittest.TestCase):
         tiny = synthetic_absorption(n=200)
         cls.w.command_convol(tiny, "gauss", 0.5)
         cls.w.command_convol(tiny, "box", 1.0)
-        cls.w.command_convol(tiny, "rot", 1.0, beta=0.0)
+        cls.w.command_convol(tiny, "rot", 50.0, beta=0.0)  # vsini warmup
+        cls.w.command_convol(tiny, "rot", d_angstrom=1.0, beta=0.0)
 
     def test_gauss_slow_fast_various_fwhm(self):
         data = synthetic_absorption(n=6000)
@@ -63,16 +65,53 @@ class TestConvolAgreement(unittest.TestCase):
                 self.assertLess(d, ATOL_FLUX, msg=f"box width={width}: {d}")
 
     def test_rot_slow_fast_various_beta(self):
+        """WRPLOT fixed-Δλ path: original value=D vs fast d_angstrom=D."""
         data = synthetic_absorption(n=6000)
         d_ang = 2.5
         for beta in (0.0, 0.3, 0.6, 1.0):
             with self.subTest(beta=beta):
                 slow = self.w.command_convol_original(data, "rot", d_ang, beta=beta)
                 fast = self.w.command_convol(
-                    data, "rot", d_ang, beta=beta, precision=None
+                    data, "rot", d_angstrom=d_ang, beta=beta, precision=None
                 )
                 d = max_abs_diff(slow[1], fast[1])
                 self.assertLess(d, ATOL_FLUX, msg=f"rot beta={beta}: {d}")
+
+    def test_rot_vsini_matches_python_twin(self):
+        """Default rot API: value = vsini [km/s], Δλ ∝ λ."""
+        data = synthetic_absorption(n=4000, lo=4800, hi=5200)
+        for vsini, beta in ((100.0, 0.0), (250.0, 0.4), (600.0, 0.6)):
+            with self.subTest(vsini=vsini, beta=beta):
+                fast = self.w.command_convol(
+                    data, "rot", vsini, beta=beta, precision=None
+                )
+                twin = _convol_rot_vsini_python(data[0], data[1], vsini, beta)
+                d = max_abs_diff(fast[1], twin)
+                self.assertLess(d, ATOL_FLUX, msg=f"vsini={vsini}: {d}")
+
+    def test_rot_vsini_width_scales_with_lambda(self):
+        """Half-width at longer λ must be larger (Δλ = λ·v/c)."""
+        x = np.linspace(1000.0, 5000.0, 8001)
+        # narrow absorption at 1200 Å and 4800 Å
+        y = np.ones_like(x)
+        y -= 0.9 * np.exp(-0.5 * ((x - 1200.0) / 0.05) ** 2)
+        y -= 0.9 * np.exp(-0.5 * ((x - 4800.0) / 0.05) ** 2)
+        data = np.array([x, y])
+        out = self.w.command_convol(data, "rot", 300.0, beta=0.0, precision=None)
+        # FWHM of residual absorption: longer-λ feature should be broader
+        def feature_fwhm(xarr, yarr, center, window):
+            m = (xarr > center - window) & (xarr < center + window)
+            xx, yy = xarr[m], yarr[m]
+            depth = 1.0 - yy
+            half = 0.5 * depth.max()
+            above = depth >= half
+            if not np.any(above):
+                return 0.0
+            return xx[above][-1] - xx[above][0]
+
+        f_blue = feature_fwhm(out[0], out[1], 1200.0, 20.0)
+        f_red = feature_fwhm(out[0], out[1], 4800.0, 50.0)
+        self.assertGreater(f_red, f_blue * 2.5)
 
     def test_gauss_on_irregular_grid(self):
         """After dense core clustering, CONVADD Δx weighting must still agree."""
@@ -125,10 +164,10 @@ class TestConvolSpeed(unittest.TestCase):
                                     centers=[(4900, 0.7, 0.12),
                                              (5000, 0.9, 0.10),
                                              (5100, 0.6, 0.15)])
-        w.command_convol(data, "rot", 2.5, beta=0.4)  # warmup
+        w.command_convol(data, "rot", d_angstrom=2.5, beta=0.4)  # warmup
         _, t_slow = time_call(w.command_convol_original, data, "rot", 2.5, beta=0.4, n=3)
         _, t_fast = time_call(
-            w.command_convol, data, "rot", 2.5, beta=0.4,
+            w.command_convol, data, "rot", d_angstrom=2.5, beta=0.4,
             precision=None, n=3,
         )
         self.assertLess(t_fast, t_slow)
@@ -142,9 +181,10 @@ def make_plots():
     data = load_continuum_flat(w)
     quiet(w.command_convol, data, "gauss", 0.5)
     quiet(w.command_convol, data, "box", 1.0)
-    quiet(w.command_convol, data, "rot", 2.5, beta=0.0)
+    quiet(w.command_convol, data, "rot", d_angstrom=2.5, beta=0.0)
 
     # Cases that match tests/test.plot CONVOL plots (have WRPLOT refs)
+    # Rot uses d_angstrom on the fast path (WRPLOT fixed-Δλ).
     wrplot_cases = [
         ("gauss", 2.0, 0.0, "GAUSS FWHM=2.0", WRPLOT_REF_CONVOL_GAUSS),
         ("box", 2.0, 0.0, "BOX / KASTEN=2.0", WRPLOT_REF_CONVOL_BOX),
@@ -163,10 +203,16 @@ def make_plots():
         slow, t_slow = time_call(
             w.command_convol_original, data, shape, value, beta=beta, n=5
         )
-        fast, t_fast = time_call(
-            w.command_convol, data, shape, value, beta=beta,
-            precision=None, n=5,
-        )
+        fast_kw = dict(precision=None, n=5)
+        if shape == "rot":
+            fast, t_fast = time_call(
+                w.command_convol, data, "rot", d_angstrom=value, beta=beta,
+                **fast_kw,
+            )
+        else:
+            fast, t_fast = time_call(
+                w.command_convol, data, shape, value, beta=beta, **fast_kw,
+            )
         ref = load_ref(ref_path) if ref_path.is_file() else None
         d_wr = (
             compare_in_window(slow, ref[:, 0], ref[:, 1], 4850, 5150)["max"]
@@ -248,10 +294,16 @@ def make_plots():
         _, t_slow = time_call(
             w.command_convol_original, data, shape, value, beta=beta, n=3
         )
-        _, t_fast = time_call(
-            w.command_convol, data, shape, value, beta=beta,
-            precision=None, n=3,
-        )
+        if shape == "rot":
+            _, t_fast = time_call(
+                w.command_convol, data, "rot", d_angstrom=value, beta=beta,
+                precision=None, n=3,
+            )
+        else:
+            _, t_fast = time_call(
+                w.command_convol, data, shape, value, beta=beta,
+                precision=None, n=3,
+            )
         timing_rows.append(dict(
             case=label, t_slow=t_slow, t_fast=t_fast, max_d_wrplot=None,
         ))
@@ -262,7 +314,8 @@ def make_plots():
         outfile="convol_timing.txt",
         notes=[
             "slow = command_convol_original (pure-Python CONVEX/CONVADD)",
-            "fast = command_convol (numba kernels)",
+            "fast = command_convol (numba; rot uses d_angstrom= for WRPLOT parity)",
+            "default command_convol(..., 'rot', vsini_kms) uses Δλ∝λ (not WRPLOT D)",
         ],
     )
     return results
