@@ -80,6 +80,207 @@ def _convol_rot_kernel(x, y, vsini_kms, beta):
         out[i] = s / wsum
     return out
 
+
+# ---------------------------------------------------------------------------
+# HLYMANA helpers (numba) for command_hlymana_fast_v2
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _voigth_njit(a, v):
+    """Normalized Voigt H(a,v); Detlef Köster implementation (scalar)."""
+    wpi = 1.77245385
+    v = abs(v)
+    vv = v * v
+
+    if a < 0.2 and v > 5.0:
+        h = ((2.12 / vv + 0.8463) / vv + 0.5642) * a / vv
+        return h / wpi
+    if a >= 0.2 and ((a > 1.4) or ((a + v) > 3.2)):
+        aa = a * a
+        u = (aa + vv) - 1.4142
+        uu = u * u
+        h = ((((aa - 10.0 * vv) * aa * 3.0 + 15.0 * vv * vv) / uu + 3.0 * vv - aa) / uu + 1.0) * a * 0.79788 / u
+        return h / wpi
+    h0 = np.exp(-vv)
+    h2 = (1.0 - 2.0 * vv) * h0
+    if v > 2.4:
+        h1 = ((-0.0032783 * vv + 0.0429913 * v - 0.188326) * vv + 0.278712 * v + 0.55415) / (vv - 1.5)
+        if a >= 0.2:
+            hh1 = h1 + h0 * 1.12838
+            hh2 = h2 + hh1 * 1.12838 - h0
+            hh3 = (1.0 - h2) * 0.37613 - hh1 * 0.66667 * vv + hh2 * 1.12838
+            hh4 = (3.0 * hh3 - hh1) * 0.37613 + h0 * 0.66667 * vv * vv
+            h = ((((hh4 * a + hh3) * a + hh2) * a + hh1) * a + h0) * (((-0.122727278 * a + 0.532770573) * a - 0.96284325) * a + 0.979895032)
+            return h / wpi
+        h = ((h2 * a + h1) * a + h0)
+        return h / wpi
+    if v <= 1.3:
+        h1 = (0.42139 * vv - 2.34358 * v + 3.28868) * vv - 0.15517 * v - 1.1247
+        if a >= 0.2:
+            hh1 = h1 + h0 * 1.12838
+            hh2 = h2 + hh1 * 1.12838 - h0
+            hh3 = (1.0 - h2) * 0.37613 - hh1 * 0.66667 * vv + hh2 * 1.12838
+            hh4 = (3.0 * hh3 - hh1) * 0.37613 + h0 * 0.66667 * vv * vv
+            h = ((((hh4 * a + hh3) * a + hh2) * a + hh1) * a + h0) * (((-0.122727278 * a + 0.532770573) * a - 0.96284325) * a + 0.979895032)
+            return h / wpi
+        h = ((h2 * a + h1) * a + h0)
+        return h / wpi
+    h1 = (-0.220416 * vv + 1.989196 * v - 6.61487) * vv + 9.39456 * v - 4.4848
+    if a >= 0.2:
+        hh1 = h1 + h0 * 1.12838
+        hh2 = h2 + hh1 * 1.12838 - h0
+        hh3 = (1.0 - h2) * 0.37613 - hh1 * 0.66667 * vv + hh2 * 1.12838
+        hh4 = (3.0 * hh3 - hh1) * 0.37613 + h0 * 0.66667 * vv * vv
+        h = ((((hh4 * a + hh3) * a + hh2) * a + hh1) * a + h0) * (((-0.122727278 * a + 0.532770573) * a - 0.96284325) * a + 0.979895032)
+        return h / wpi
+    h = ((h2 * a + h1) * a + h0)
+    return h / wpi
+
+
+@njit(cache=True)
+def _hlymana_tau_lorentz(lam, xlam, c0, c1, enh):
+    """Optical depth for Lorentzian Lyman series (all lines, all wavelengths)."""
+    n = len(lam)
+    nlines = len(xlam)
+    tau = np.zeros(n)
+    for j in range(nlines):
+        xj = xlam[j]
+        c0j = c0[j]
+        c1j = c1[j]
+        for i in range(n):
+            dlam = lam[i] - xj
+            tau[i] += c0j / (1.0 + c1j * dlam * dlam)
+    for i in range(n):
+        tau[i] *= enh
+    return tau
+
+
+@njit(cache=True)
+def _hlymana_tau_lorentz_points(lam_pts, xlam, c0, c1, enh):
+    """Optical depth at a short list of wavelengths only."""
+    n = len(lam_pts)
+    nlines = len(xlam)
+    tau = np.zeros(n)
+    for i in range(n):
+        t = 0.0
+        x = lam_pts[i]
+        for j in range(nlines):
+            dlam = x - xlam[j]
+            t += c0[j] / (1.0 + c1[j] * dlam * dlam)
+        tau[i] = enh * t
+    return tau
+
+
+@njit(cache=True)
+def _hlymana_tau_voigt(lam, xlam, a_arr, fak_arr, dndopp, enh, clight):
+    n = len(lam)
+    nlines = len(xlam)
+    tau = np.zeros(n)
+    for j in range(nlines):
+        xj = xlam[j]
+        aj = a_arr[j]
+        fakj = fak_arr[j]
+        dn = dndopp[j]
+        xj2 = xj * xj
+        for i in range(n):
+            dlam = lam[i] - xj
+            dnue = clight * 1.0e13 * dlam / xj2
+            v = dnue / dn
+            tau[i] += fakj * _voigth_njit(aj, v) * enh
+    return tau
+
+
+@njit(cache=True)
+def _hlymana_tau_voigt_points(lam_pts, xlam, a_arr, fak_arr, dndopp, enh, clight):
+    n = len(lam_pts)
+    nlines = len(xlam)
+    tau = np.zeros(n)
+    for i in range(n):
+        t = 0.0
+        x = lam_pts[i]
+        for j in range(nlines):
+            dlam = x - xlam[j]
+            dnue = clight * 1.0e13 * dlam / (xlam[j] * xlam[j])
+            v = dnue / dndopp[j]
+            t += fak_arr[j] * _voigth_njit(a_arr[j], v) * enh
+        tau[i] = t
+    return tau
+
+
+@njit(cache=True)
+def _hlymana_adaptive_refine(lam, flux, tau, xlam, c0, c1, a_arr, fak_arr, dndopp,
+                             enh, clight, use_voigt, taucrit, max_iter):
+    """
+    Adaptive midpoint insertion where |Δτ/τ| > taucrit.
+    Reuses existing τ and only evaluates newly inserted midpoints.
+    Returns (lam, flux, tau, n_iters).
+    """
+    iter_count = 0
+    while iter_count < max_iter:
+        iter_count += 1
+        n = len(lam)
+        # count how many segments need a midpoint
+        n_mid = 0
+        for i in range(n - 1):
+            tL = tau[i]
+            denom = 1.0e-40 if tL == 0.0 else tL
+            rel = abs((tau[i + 1] - tL) / denom)
+            gap = lam[i + 1] - lam[i]
+            if rel > taucrit and gap > 0.001:
+                n_mid += 1
+
+        if n_mid == 0:
+            break
+
+        midpoints = np.empty(n_mid)
+        mid_left = np.empty(n_mid, dtype=np.int64)
+        k = 0
+        for i in range(n - 1):
+            tL = tau[i]
+            denom = 1.0e-40 if tL == 0.0 else tL
+            rel = abs((tau[i + 1] - tL) / denom)
+            gap = lam[i + 1] - lam[i]
+            if rel > taucrit and gap > 0.001:
+                midpoints[k] = 0.5 * (lam[i] + lam[i + 1])
+                mid_left[k] = i
+                k += 1
+
+        if use_voigt:
+            tau_mid = _hlymana_tau_voigt_points(
+                midpoints, xlam, a_arr, fak_arr, dndopp, enh, clight
+            )
+        else:
+            tau_mid = _hlymana_tau_lorentz_points(midpoints, xlam, c0, c1, enh)
+
+        # Merge old grid + midpoints (already sorted by construction)
+        n_out = n + n_mid
+        lam_out = np.empty(n_out)
+        flux_out = np.empty(n_out)
+        tau_out = np.empty(n_out)
+        j = 0
+        mi = 0
+        for i in range(n - 1):
+            lam_out[j] = lam[i]
+            flux_out[j] = flux[i]
+            tau_out[j] = tau[i]
+            j += 1
+            if mi < n_mid and mid_left[mi] == i:
+                lam_out[j] = midpoints[mi]
+                flux_out[j] = 0.5 * (flux[i] + flux[i + 1])
+                tau_out[j] = tau_mid[mi]
+                j += 1
+                mi += 1
+        lam_out[j] = lam[n - 1]
+        flux_out[j] = flux[n - 1]
+        tau_out[j] = tau[n - 1]
+
+        lam = lam_out
+        flux = flux_out
+        tau = tau_out
+
+    return lam, flux, tau, iter_count
+
+
 class wrplotter:
         
     def __init__(self):
@@ -2057,6 +2258,217 @@ class wrplotter:
         if info:
             print(f"HLYMANA: Dataset expanded to {len(lam_curr)} Datapoints after adaptive refinement (iters={iter_count}).")
     
+        return np.array([lam_curr, flux_out])
+
+    def command_hlymana_fast_v2(
+        self,
+        dataset,
+        key="coldens",
+        value=-1,
+        vrad=0,
+        temp=-1,
+        vturb=0,
+        info=False,
+        cut_lyman=True,
+        lyman_window=(900.0, 1300.0),
+    ):
+        """
+        Faster rewrite of ``command_hlymana_fast``.
+
+        Same physics and adaptive τ-refinement criterion, but:
+          * Lorentzian / Voigt optical-depth sums are numba-compiled
+          * refinement only evaluates τ at newly inserted midpoints
+          * midpoints are merged in order (no full re-sort each iteration)
+          * final τ is reused from the last refinement pass
+          * by default only the Lyman window is processed, then stitched
+            back onto the unmodified spectrum (see ``cut_lyman``)
+
+        Parameters
+        ----------
+        cut_lyman : bool, default True
+            If True, apply the correction only inside ``lyman_window`` and
+            leave wavelengths outside that range unchanged. Set False to
+            process the full input spectrum.
+        lyman_window : tuple (lo, hi), default (900, 1300)
+            Observed-frame wavelength window in Angstrom used when
+            ``cut_lyman`` is True. Shifted with ``vrad`` like the lines.
+        """
+        XLAM0 = np.float64([1215.671, 1025.722, 972.5366, 949.74297,
+                 937.80344, 930.74824, 926.22571, 923.15037,
+                 920.96313, 919.35146, 918.12939, 917.18061,
+                 916.42917, 915.82388, 915.32904, 914.91936,
+                 914.57629, 914.28622, 914.0386, 913.82569,
+                 913.64126, 913.48036, 913.33922, 913.2147,
+                 913.10431, 913.00597, 912.918, 912.83898,
+                 912.76775, 912.70331, 912.64482])
+
+        C0 = np.float64([7.056E-11, 4.428E-11, 3.788E-11, 3.522E-11,
+              3.381E-11, 3.298E-11, 3.243E-11, 3.204E-11,
+              3.177E-11, 3.156E-11, 3.141E-11, 3.129E-11,
+              3.12E-11, 3.112E-11, 3.106E-11, 3.101E-11,
+              3.097E-11, 3.093E-11, 3.09E-11, 3.087E-11,
+              3.085E-11, 3.083E-11, 3.081E-11, 3.079E-11,
+              3.078E-11, 3.077E-11, 3.076E-11, 3.075E-11,
+              3.074E-11, 3.073E-11, 3.072E-11])
+
+        C1 = np.float64([1.657E+09, 3.575E+10, 2.402E+11, 9.867E+11,
+              3.059E+12, 7.871E+12, 1.773E+13, 3.628E+13,
+              6.036E+13, 9.76E+13, 1.427E+14, 1.941E+14,
+              2.505E+14, 3.106E+14, 3.734E+14, 4.381E+14,
+              5.042E+14, 5.712E+14, 6.387E+14, 7.064E+14,
+              7.743E+14, 8.421E+14, 9.098E+14, 9.773E+14,
+              1.044E+15, 1.111E+15, 1.178E+15, 1.244E+15,
+              1.31E+15, 1.376E+15, 1.441E+15])
+
+        FVALUE = np.float64([4.1620E-01, 7.9100E-02, 2.8990E-02, 1.3940E-02,
+                  7.7990E-03, 4.8140E-03, 3.1830E-03, 2.2160E-03,
+                  1.6050E-03, 1.2010E-03, 9.2140E-04, 7.2270E-04,
+                  5.7740E-04, 4.6860E-04, 3.8560E-04, 3.2110E-04,
+                  2.7030E-04, 2.2960E-04, 1.9670E-04, 1.6980E-04,
+                  1.4760E-04, 1.2910E-04, 1.1360E-04, 1.0050E-04,
+                  8.9290E-05, 7.9700E-05, 7.1450E-05, 6.4300E-05,
+                  5.8070E-05, 5.2610E-05, 4.7830E-05])
+
+        GAMM = np.float64([6.26500E+08, 1.89700E+08, 8.12700E+07, 4.20400E+07,
+                     2.45000E+07, 1.4043E+07, 9.3788E+06, 6.5742E+06,
+                     4.7849E+06, 3.5931E+06, 2.7643E+06, 2.1728E+06,
+                     1.7388E+06, 1.4131E+06, 1.1641E+06, 9.7030E+05,
+                     8.1739E+05, 6.9477E+05, 5.9556E+05, 5.1437E+05,
+                     4.4730E+05, 3.9138E+05, 3.4449E+05, 3.0485E+05,
+                     2.7091E+05, 2.4188E+05, 2.1689E+05, 1.9522E+05,
+                     1.7632E+05, 1.5978E+05, 1.4527E+05])
+
+        C2 = 3.8e21
+        CLIGHT = 299792.458
+        ATMASSH = 1.00794
+        XKBOLTZ = 1.38065000e-16
+        XMP = 1.67262160e-24
+        XLYEDGE0 = 911.2670504
+        SIGMACL = 0.026537
+        TAUCRIT = 0.1
+        MAX_ITER = 20
+
+        lam_full = np.asarray(dataset[0], dtype=np.float64).copy()
+        flux_full = np.asarray(dataset[1], dtype=np.float64).copy()
+
+        if not np.all(np.diff(lam_full) > 0):
+            order = np.argsort(lam_full)
+            lam_full = lam_full[order]
+            flux_full = flux_full[order]
+
+        XLAM = XLAM0 * (1.0 + vrad / CLIGHT)
+        XLYEDGE = XLYEDGE0 * (1.0 + vrad / CLIGHT)
+
+        key_lower = key.lower()
+        if key_lower == "ebv":
+            ENH = C2 * value
+        elif key_lower == "coldens":
+            ENH = float(value)
+        else:
+            print("Error: Unknown keyword in HLYMANA.")
+            print("Please use 'coldens' or 'ebv'.")
+            print("Returning unmodified dataset.")
+            return dataset
+
+        if ENH == 0.0:
+            return np.array([lam_full, flux_full])
+
+        # Optional cut–apply–stitch: only process the Lyman window
+        win_lo = float(lyman_window[0]) * (1.0 + vrad / CLIGHT)
+        win_hi = float(lyman_window[1]) * (1.0 + vrad / CLIGHT)
+        if cut_lyman:
+            mid_mask = (lam_full >= win_lo) & (lam_full <= win_hi)
+            if not np.any(mid_mask):
+                if info:
+                    print(
+                        f"HLYMANA: cut_lyman window [{win_lo:.1f}, {win_hi:.1f}] "
+                        "does not overlap spectrum; returning unmodified."
+                    )
+                return np.array([lam_full, flux_full])
+            left_mask = lam_full < win_lo
+            right_mask = lam_full > win_hi
+            lam_left, flux_left = lam_full[left_mask], flux_full[left_mask]
+            lam_right, flux_right = lam_full[right_mask], flux_full[right_mask]
+            lam = lam_full[mid_mask].copy()
+            flux = flux_full[mid_mask].copy()
+        else:
+            lam_left = flux_left = lam_right = flux_right = None
+            lam = lam_full
+            flux = flux_full
+
+        lam_min = lam[0]
+        lam_max = lam[-1]
+
+        # Seed line centers / Lyman edge inside the processed segment
+        centers_to_add = XLAM[(XLAM >= lam_min) & (XLAM <= lam_max)]
+        extra_lam = []
+        if centers_to_add.size:
+            extra_lam.append(centers_to_add)
+        if (XLYEDGE > lam_min) and (XLYEDGE < lam_max):
+            extra_lam.append(np.array([XLYEDGE - 0.001, XLYEDGE + 0.001]))
+        if extra_lam:
+            extra = np.concatenate(extra_lam)
+            flux_extra = np.interp(extra, lam, flux)
+            lam = np.concatenate([lam, extra])
+            flux = np.concatenate([flux, flux_extra])
+            order = np.argsort(lam)
+            lam = lam[order]
+            flux = flux[order]
+
+        use_voigt = (temp > 0.0) or (vturb > 0.0)
+        if use_voigt:
+            VTURB_CGS = vturb * 1e5
+            VDOPP = np.sqrt(2.0 * XKBOLTZ * temp / (XMP * ATMASSH) + VTURB_CGS ** 2)
+            DNDOPP = VDOPP / (XLAM * 1e-8)
+            A_arr = GAMM / (4.0 * np.pi * DNDOPP)
+            FAK_arr = SIGMACL * FVALUE / DNDOPP
+            tau0 = _hlymana_tau_voigt(lam, XLAM, A_arr, FAK_arr, DNDOPP, ENH, CLIGHT)
+        else:
+            A_arr = np.empty(0)
+            FAK_arr = np.empty(0)
+            DNDOPP = np.empty(0)
+            tau0 = _hlymana_tau_lorentz(lam, XLAM, C0, C1, ENH)
+
+        lam_curr, flux_curr, tau_final, iter_count = _hlymana_adaptive_refine(
+            lam, flux, tau0, XLAM, C0, C1, A_arr, FAK_arr, DNDOPP,
+            ENH, CLIGHT, use_voigt, TAUCRIT, MAX_ITER,
+        )
+
+        if info and iter_count >= MAX_ITER:
+            print("HLYMANA: reached max refinement iterations.")
+
+        flux_out = np.where(tau_final < 10.0, flux_curr * np.exp(tau_final), 0.0)
+        if info and np.any(tau_final >= 10.0):
+            print("Warning: In Lyman alpha correction tau >= 10. Flux set to 0.0 at some points.")
+
+        TAULYMEDGE = ENH * C0[0]
+        EXPTAULYMEDGE = np.exp(TAULYMEDGE) if TAULYMEDGE < 10.0 else 0.0
+        mask = (lam_curr < XLAM[-1]) & (lam_curr > XLYEDGE)
+        flux_out[mask] *= EXPTAULYMEDGE
+
+        if cut_lyman:
+            parts_x = []
+            parts_y = []
+            if lam_left.size:
+                parts_x.append(lam_left)
+                parts_y.append(flux_left)
+            parts_x.append(lam_curr)
+            parts_y.append(flux_out)
+            if lam_right.size:
+                parts_x.append(lam_right)
+                parts_y.append(flux_right)
+            lam_curr = np.concatenate(parts_x)
+            flux_out = np.concatenate(parts_y)
+
+        if info:
+            n_proc = int(np.sum((lam_curr >= win_lo) & (lam_curr <= win_hi))) if cut_lyman else len(lam_curr)
+            print(
+                f"HLYMANA: Dataset expanded to {len(lam_curr)} Datapoints "
+                f"after adaptive refinement (iters={iter_count}"
+                + (f", cut_lyman=[{win_lo:.1f},{win_hi:.1f}], processed≈{n_proc}" if cut_lyman else "")
+                + ")."
+            )
+
         return np.array([lam_curr, flux_out])
 
     def __polynom(self,X,COEFF):
