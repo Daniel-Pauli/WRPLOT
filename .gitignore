@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+tests/.mplconfig/
+*.ps
+wrplot.ps.*
