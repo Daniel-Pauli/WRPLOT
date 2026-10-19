@@ -17,8 +17,29 @@ from numba import njit
 
 
 @njit(cache=True)
+def _local_spacing(x, k, n):
+    """
+    Local sample weight |Δx| as in WRPLOT CONVADD:
+      interior: |x[k+1] - x[k-1]| / 2
+      edges:    |x[0] - x[1]| or |x[n-2] - x[n-1]|
+    """
+    if n < 2:
+        return 1.0
+    if k > 0 and k < n - 1:
+        return abs((x[k + 1] - x[k - 1]) * 0.5)
+    if k == 0:
+        return abs(x[0] - x[1])
+    return abs(x[n - 2] - x[n - 1])
+
+
+@njit(cache=True)
 def _convol_gauss_kernel(x, y, sigma, half_width):
-    """Discrete Gaussian convolution on an irregular but sorted wavelength grid."""
+    """
+    Discrete Gaussian convolution on an irregular but sorted wavelength grid.
+
+    Each sample is weighted by the kernel value times local spacing (WRPLOT
+    CONVADD), so dense clusters (e.g. after ISMLINE) are not over-weighted.
+    """
     n = len(x)
     out = np.empty(n)
     for i in range(n):
@@ -30,16 +51,20 @@ def _convol_gauss_kernel(x, y, sigma, half_width):
         wsum = 0.0
         for j in range(lo, hi):
             u = (x[j] - mu) / sigma
-            w = np.exp(-0.5 * u * u)
+            w = np.exp(-0.5 * u * u) * _local_spacing(x, j, n)
             s += y[j] * w
             wsum += w
-        out[i] = s / wsum
+        out[i] = s / wsum if wsum != 0.0 else 0.0
     return out
 
 
 @njit(cache=True)
 def _convol_box_kernel(x, y, width):
-    """Discrete box convolution on an irregular but sorted wavelength grid."""
+    """
+    Discrete box convolution on an irregular but sorted wavelength grid.
+
+    Weights include local spacing (WRPLOT CONVADD), matching command_convol.
+    """
     n = len(x)
     out = np.empty(n)
     for i in range(n):
@@ -47,9 +72,12 @@ def _convol_box_kernel(x, y, width):
         lo = np.searchsorted(x, mu - width, side="right")
         hi = np.searchsorted(x, mu + width, side="left")
         s = 0.0
+        wsum = 0.0
         for j in range(lo, hi):
-            s += y[j]
-        out[i] = s / (hi - lo)
+            w = _local_spacing(x, j, n)
+            s += y[j] * w
+            wsum += w
+        out[i] = s / wsum if wsum != 0.0 else 0.0
     return out
 
 
@@ -58,7 +86,8 @@ def _convol_rot_kernel(x, y, vsini_kms, beta):
     """
     Discrete rotational-broadening convolution on an irregular but sorted grid.
 
-    Kernel width scales with wavelength (Δλ = vsini/c * λ), matching command_convol.
+    Kernel width scales with wavelength (Δλ = vsini/c * λ). Weights include
+    local spacing (WRPLOT CONVADD), matching command_convol.
     """
     n = len(x)
     out = np.empty(n)
@@ -74,10 +103,10 @@ def _convol_rot_kernel(x, y, vsini_kms, beta):
         wsum = 0.0
         for j in range(lo, hi):
             z2 = ((mu - x[j]) / half) ** 2
-            w = c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)
+            w = (c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)) * _local_spacing(x, j, n)
             s += y[j] * w
             wsum += w
-        out[i] = s / wsum
+        out[i] = s / wsum if wsum != 0.0 else 0.0
     return out
 
 
@@ -1188,11 +1217,17 @@ class wrplotter:
     def command_convol(self, dataset, shape="gaussian", value=0, beta=0):
         """    
         Convolution of a dataset with a given function/shape.
+
+        Sample weights follow WRPLOT CONVADD: kernel(Δλ) × local spacing
+        |Δx|, so results stay correct on non-uniform grids (e.g. after
+        ISMLINE inserts a dense core). On a uniform grid this is identical
+        to unweighted kernel normalization.
         
         Parameters
         ----------
         dataset: np.array or list or int
-            Dataset that should be modified.
+            Dataset that should be modified. If the wavelength axis is not
+            sorted ascending, it is sorted (with flux) before convolution.
         shape: str default: gaussian
             Possible options: "gauss" or gaussian", "box" or "kasten", "rot" or "rotation"
         value: float default: 0
@@ -1208,45 +1243,40 @@ class wrplotter:
         -------
         The modified dataset. 
         """
-        
         if value == 0:
             return dataset
-        
+
+        x = np.asarray(dataset[0], dtype=float).copy()
+        y = np.asarray(dataset[1], dtype=float).copy()
+        if x.size > 1 and np.any(x[1:] < x[:-1]):
+            order = np.argsort(x, kind="mergesort")
+            x = x[order]
+            y = y[order]
+
         shape = shape.lower()
-        if shape == "gauss" or shape == "gaussian":
-            sigma = value/2.354820045 #FWHM = 2 sqrt(2 ln(2)) stddev
-            new_y = []
-            for mu in dataset[0]:
-                temp_data = self.command_cut(dataset,(mu-4.5*sigma,mu+4.5*sigma),axis="x")
-                gaussian = self.gauss(temp_data[0],mu,sigma)
-                new_y.append(np.dot(temp_data[1],gaussian/sum(gaussian)))
-            return np.array([dataset[0],new_y])
-        elif shape == "box" or shape == "kasten":
-            new_y = []
-            for mu in dataset[0]:
-                temp_data = self.command_cut(dataset,(mu-value,mu+value),axis="x")
-                boxprof = self.box(temp_data[0],mu,value)
-                new_y.append(np.dot(temp_data[1],boxprof/sum(boxprof)))
-            return np.array([dataset[0],new_y])
-        elif shape == "rot" or shape == "rotation":
-            new_y = []
-            for mu in dataset[0]:
-                temp_data = self.command_cut(dataset,(mu-value/299792.458*mu,mu+value/299792.458*mu),axis="x")
-                rot_prof = self.rot(temp_data[0],mu,value,beta)
-                new_y.append(np.dot(temp_data[1],rot_prof/sum(rot_prof)))
-            return np.array([dataset[0],new_y])
+        if shape in ("gauss", "gaussian"):
+            sigma = value / 2.354820045  # FWHM = 2 sqrt(2 ln(2)) stddev
+            y_new = _convol_gauss_kernel(x, y, sigma, 4.5 * sigma)
+        elif shape in ("box", "kasten"):
+            y_new = _convol_box_kernel(x, y, value)
+        elif shape in ("rot", "rotation"):
+            y_new = _convol_rot_kernel(x, y, value, beta)
+        else:
+            raise ValueError(f"Unknown convolution shape: {shape}")
+        return np.array([x, y_new])
             
     def command_convol_fast(self, dataset, shape="gaussian", value=0, beta=0,
                             precision=1e-4, allow_fft=False):
         """    
         Fast convolution agreeing with ``command_convol`` to within ``precision``.
 
-        By default this always uses the exact discrete, per-point weighted sums
-        as ``command_convol`` (numba-accelerated kernel path). An optional FFT
-        path exists for speed on uniform grids, but it is **opt-in** via
-        ``allow_fft=True`` because FFT assumes uniform Δλ and a single fixed
-        kernel — conditions that real spectra and rotational broadening often
-        violate.
+        By default this always uses the exact discrete, per-point sums of
+        ``command_convol`` (numba kernels with WRPLOT-style kernel×Δx
+        weights). An optional FFT path exists for speed on uniform grids,
+        but it is **opt-in** via ``allow_fft=True`` because FFT assumes
+        uniform Δλ and a single fixed kernel — conditions that real spectra
+        and rotational broadening often violate. On a uniform grid the FFT
+        path is consistent with Δx weighting (constant Δx cancels).
 
         Parameters
         ----------
