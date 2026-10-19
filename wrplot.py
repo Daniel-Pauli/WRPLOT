@@ -129,7 +129,7 @@ def _voigth_njit(a, v):
         return h / wpi
     if a >= 0.2 and ((a > 1.4) or ((a + v) > 3.2)):
         aa = a * a
-        u = (aa + vv) - 1.4142
+        u = (aa + vv) * 1.4142
         uu = u * u
         h = ((((aa - 10.0 * vv) * aa * 3.0 + 15.0 * vv * vv) / uu + 3.0 * vv - aa) / uu + 1.0) * a * 0.79788 / u
         return h / wpi
@@ -167,6 +167,36 @@ def _voigth_njit(a, v):
         return h / wpi
     h = ((h2 * a + h1) * a + h0)
     return h / wpi
+
+
+@njit(cache=True)
+def _ismline_apply_voigt(x, y, xlam, a_voigt, fak, enh, qdndopp):
+    """Apply ISMLINE Voigt optical depth in-place (Fortran formulae)."""
+    n = len(x)
+    for i in range(n):
+        dlam = x[i] - xlam
+        v = abs(dlam) * 1.0e-8 * qdndopp
+        hh = _voigth_njit(a_voigt, v)
+        tau = fak * hh * enh
+        if tau < 10.0:
+            y[i] = y[i] * np.exp(tau)
+        else:
+            y[i] = 0.0
+    return y
+
+
+@njit(cache=True)
+def _ismline_apply_lorentz(x, y, xlam, c0, c1, enh):
+    """Apply ISMLINE Lorentz optical depth in-place (Fortran formulae)."""
+    n = len(x)
+    for i in range(n):
+        dlam = (x[i] - xlam) * 1.0e-8
+        tau = c0 * enh / (1.0 + c1 * dlam * dlam)
+        if tau < 10.0:
+            y[i] = y[i] * np.exp(tau)
+        else:
+            y[i] = 0.0
+    return y
 
 
 @njit(cache=True)
@@ -3307,213 +3337,215 @@ class wrplotter:
 
         return np.array([x, y])
 
-    def command_ismline_fast(self,dataset,coldens,l0,fvalue,gamm,atmass=None,vrad=0.0,temp=-1.0,vturb=0.0,window=5.0,info=False):
+
+    def command_ismline_fast(self, dataset, coldens, l0, fvalue, gamm,
+                             atmass=None, vrad=0.0, temp=-273.15, vturb=0.0,
+                             cut_ism=True, window=30.0, ism_window=None,
+                             info=False):
         """
-        Apply corrections for interstellar absorption by hydrogen Lyman lines (from Lyα to Ly20).
-        By default, HLYMAN uses the formalism from Groenewegen & Lamers (1989) which accounts only 
-        for the damping (i.e. Lorentzian) profiles but no Doppler cores. However, if one of the 
-        parameters T and/or VTURB is specified, HLYMAN applies Voigt profiles with the according 
-        Doppler velocity.
-        
+        Fast version of ``command_ismline`` with the same Fortran optics.
+
+        Speeds up by:
+          1. batch-inserting the quadratic ISMLINE wavelength grid (one merge),
+          2. numba-accelerated Voigt/Lorentz optical-depth application,
+          3. optionally restricting work to a spectral window around the line
+             (``cut_ism``), then stitching unmodified continuum back on
+             (same idea as ``command_hlymana_fast`` / ``cut_lyman``).
+
         Parameters
         ----------
-        dataset: np.array or list
-            Dataset that should be modified.
-            First column should have wavelenghts in Angstrom 
-            Second column should be linear flux (i.e. in erg/s/cm^2/Ang)
-        coldens: int, float
-            The value of the coloumn density.
-        l0: float
-            wavelenth of ISM line
-        fvalue: float
-            Oscillator strength
-        gamm: float
-            Damping factor
-        atmass: float
-            Atomic mass
-        vrad: int, float
-            The radial velocity in km/s
-        temp: int, float
-            Temperature in Kelvin; 
-            if T > -1:
-                Account for Doppler broadening with the thermal velocity
-        vturb: int, float
-            Turbulence velocity in km/s
-            if vturb > -1:
-                additional Doppler broadening
-            
+        dataset, coldens, l0, fvalue, gamm, atmass, vrad, temp, vturb, info
+            Same meaning and defaults as ``command_ismline``.
+        cut_ism : bool, default True
+            If True, apply the line only inside a wavelength window and leave
+            points outside unchanged. Set False to process the full spectrum
+            (bit-identical intent to ``command_ismline``, still much faster).
+        window : float, default 30.0
+            Half-width [Angstrom] around the velocity-shifted line centre used
+            when ``cut_ism`` is True and ``ism_window`` is None. The Fortran
+            insert grid only reaches ±25 Å, so 30 Å covers all inserted points
+            plus a little wing margin.
+        ism_window : tuple or None, default None
+            Optional absolute wavelength bounds ``(lo, hi)`` [Angstrom] used
+            instead of ``±window`` around the shifted line when ``cut_ism`` is
+            True.
+
         Returns
         -------
-        The modified dataset.
+        np.ndarray
+            Modified [wavelength, flux] dataset (grid may be expanded inside
+            the processed region).
 
         Notes
-        -------
-        The dataset must be monotonic.
+        -----
+        With ``cut_ism=True``, damping wings outside the window are neglected.
+        Use ``cut_ism=False`` (or a very wide window) for a full-spectrum match.
         """
-        import numpy as np
-    
-        # --- constants and line data (same as your original) ---
-    
+        # --- constants (identical to ismline.f / command_ismline) ---
         CLIGHT = 299792.458
-    
         XKBOLTZ = 1.38065000e-16
-        CLCM    = 2.99792458e10
-        ECHAR   = 4.80325000e-10
-        XME     = 9.10938190e-28
-        XMP     = 1.67262160e-24
-        SIGMACL = 0.026537
+        CLCM = 2.99792458e10
+        ECHAR = 4.80325000e-10
+        XME = 9.10938190e-28
+        XMP = 1.67262160e-24
 
-        XLAM = l0 * (1.0 + vrad / CLIGHT)
-        XLAM0 = np.float64([XLAM])
-    
-        C0 = np.float64([4 * np.pi * ECHAR * ECHAR / ( XME * CLCM * gamm ) * fvalue])
-    
-        C1 = np.float64([(4 * np.pi * CLCM / (XLAM * 1e-8 * XLAM * 1e-8 * gamm))**2])
-    
-        FVALUE = np.float64([fvalue])
-    
-        GAMM = np.float64([gamm])
-    
-        ATMASSH = atmass
-    
-        # adaptive insertion params (same names as your code)
-        TAUCRIT = 0.1
-        MAXNPOINTS = 0
-    
-        # --- prepare dataset (ensure numpy arrays) ---
-        lam = np.asarray(dataset[0], dtype=np.float64)
-        flux = np.asarray(dataset[1], dtype=np.float64)
-    
-        # sort if not monotonic
-        if not np.all(np.diff(lam) > 0):
-            # minimal safe sort (faster than calling external command_sort)
-            order = np.argsort(lam)
-            lam = lam[order]
-            flux = flux[order]
-    
-        lam_min = lam[0]
-        lam_max = lam[-1]
-    
-        # compute ENH (column density)
-        ENH = coldens
-    
-        # --- ensure line centers and Lyman edge points are present in grid ---
-        # Add line centers that fall inside the dataset range
-        # centers_to_add = XLAM[(XLAM >= lam_min) & (XLAM <= lam_max)]
-        # if centers_to_add.size:
-        if lam_min <= XLAM <= lam_max:
-            lam = np.concatenate([lam, [XLAM]])
-            flux = np.concatenate([flux, np.interp([XLAM], dataset[0], dataset[1])])
-    
-        # sort after adding
-        order = np.argsort(lam)
-        lam = lam[order]
-        flux = flux[order]
-    
-        # Precompute Voigt/Lorentz parameters for lines once
-        VTURB_CGS = vturb * 1e5
-        use_voigt = (temp > 0.) or (vturb > 0.)
-        if use_voigt:
-            VDOPP = np.sqrt(2.0 * XKBOLTZ * temp / (XMP * ATMASSH) + VTURB_CGS**2)  # cm/s
-            DNDOPP = VDOPP / (np.float64([XLAM]) * 1e-8)  # Hz
-            A_arr = GAMM / (4.0 * np.pi * DNDOPP)
-            FAK_arr = SIGMACL * FVALUE / DNDOPP
-        else:
-            # Lorentz: nothing to precompute beyond C0,C1 arrays above
-            pass
-    
-        # --- function to compute tau on a wavelength array (vectorized over lam) ---
-        def compute_tau(lam_array):
-            # lam_array: 1D numpy array
-            if use_voigt:
-                tau_local = np.zeros_like(lam_array, dtype=np.float64)
-                # loop over lines (31 iterations) -- acceptable
-                for j in range(len([XLAM])):
-                    DLAM = lam_array - [XLAM][j]                       # angstrom
-                    DNUE = CLIGHT * 1e13 * DLAM / ([XLAM][j]**2)      # normalized freq diff
-                    V = DNUE / DNDOPP[j]                            # dimensionless v
-                    # call your voigt for whole vector V -> produce H(v)
-                    # we build H vector by calling voigt per V (self.voigth expects scalars)
-                    # but do it once per line (vector size = len(lam_array))
-                    H = np.empty_like(V)
-                    # using list comprehension is faster than Python loop for large V
-                    # but to keep compatibility we explicitly fill via numpy-ish loop:
-                    for k, vk in enumerate(V):
-                        H[k] = self.voigth(a=A_arr[j], v=vk)
-                    tau_local += FAK_arr[j] * H * ENH
-                return tau_local
+        PI = 4.0 * np.arctan(1.0)
+        QPI = 1.0 / PI
+        QC = 1.0 / CLCM
+        FRBB = PI * ECHAR * ECHAR / XME / CLCM
+
+        TEMP = float(temp)
+        VTURB = float(vturb)
+        VRAD = float(vrad)
+        FVALUE = float(fvalue)
+        ATMASS = 0.0 if atmass is None else float(atmass)
+        XLAM = float(l0)
+        GAMM = float(gamm)
+        ENH = float(coldens)
+
+        if FVALUE <= 0.0:
+            raise ValueError(
+                "ISMLINE : Oscillator strenght F is missing or wrong."
+            )
+        if GAMM <= 0.0:
+            raise ValueError(
+                "ISMLINE : Lifetime GAMM is missing or wrong."
+            )
+        if XLAM <= 0.0:
+            raise ValueError(
+                "ISMLINE : Wavelength L0 is missing or wrong."
+            )
+        if ATMASS <= 0.0 and TEMP > 0.0:
+            raise ValueError(
+                "ISMLINE : Atomic mass A for option T is missing or wrong."
+            )
+        if ENH == 0.0:
+            raise ValueError(
+                "ISM : Column density COLDENS is missing or zero."
+            )
+
+        XLAM = XLAM * (1.0 + VRAD / CLIGHT)
+        VTURB = VTURB * 1.0e5
+
+        C0 = C1 = 0.0
+        if TEMP <= 0.0 and VTURB <= 0.0:
+            C0 = (4.0 * PI * ECHAR * ECHAR / (XME * CLCM * GAMM)) * FVALUE
+            C1 = (4.0 * PI * CLCM / (XLAM * 1.0e-8 * XLAM * 1.0e-8 * GAMM)) ** 2
+
+        lam_full = np.asarray(dataset[0], dtype=np.float64).copy()
+        flux_full = np.asarray(dataset[1], dtype=np.float64).copy()
+        if lam_full.size > 1 and np.any(np.diff(lam_full) < 0):
+            if info:
+                print("Warning: Dataset not monotonic. Sorting.")
+            order = np.argsort(lam_full, kind="mergesort")
+            lam_full = lam_full[order]
+            flux_full = flux_full[order]
+
+        # --- optional spectral window (cut / stitch) ---
+        if cut_ism:
+            if ism_window is not None:
+                winlo = float(ism_window[0])
+                winhi = float(ism_window[1])
             else:
-                # Lorentzian sum (vectorized)
-                DLAM = lam_array[:, None] - XLAM[None, :]
-                denom = 1.0 + C1[None, :] * (DLAM**2)
-                sumterm = np.sum(C0[None, :] / denom, axis=1)
-                return ENH * sumterm
-    
-        # --- Adaptive refinement loop (batch midpoint insertion) ---
-        # We'll iteratively compute tau on the current lam grid and insert midpoints
-        # where relative change in tau between adjacent points exceeds TAUCRIT.
-        max_iter = 20  # safety cap to avoid infinite loops
-        iter_count = 0
-        lam_curr = lam
-        flux_curr = flux
-    
-        while True:
-            iter_count += 1
-            tau_curr = compute_tau(lam_curr)
-            # relative change between adjacent tau entries (use tiny floor to avoid div by zero)
-            tau_left = tau_curr[:-1]
-            tau_right = tau_curr[1:]
-            denom = np.where(tau_left == 0.0, 1e-40, tau_left)
-            rel_change = np.abs((tau_right - tau_left) / denom)
-    
-            # find indices where criterion triggers and spacing is large enough
-            gaps = lam_curr[1:] - lam_curr[:-1]
-            need_refine_mask = (rel_change > TAUCRIT) & (gaps > 0.001)
-    
-            if not np.any(need_refine_mask):
-                break  # grid is sufficiently refined
-    
-            # Create midpoints for all segments that need refining (batch)
-            indices = np.nonzero(need_refine_mask)[0]
-            midpoints = (lam_curr[indices] + lam_curr[indices + 1]) * 0.5
-    
-            # Insert midpoints into lam_curr and interpolate flux_curr at those midpoints
-            lam_new = np.concatenate([lam_curr, midpoints])
-            flux_new = np.concatenate([flux_curr, np.interp(midpoints, lam_curr, flux_curr)])
-            order = np.argsort(lam_new)
-            lam_curr = lam_new[order]
-            flux_curr = flux_new[order]
-    
-            # safety: avoid too many iterations
-            if iter_count >= max_iter:
+                half = float(window)
+                winlo = XLAM - half
+                winhi = XLAM + half
+            mid_mask = (lam_full >= winlo) & (lam_full <= winhi)
+            if not np.any(mid_mask):
                 if info:
-                    print("HLYMANA: reached max refinement iterations.")
-                break
-    
-        # After refinement, compute final tau & apply to flux
-        tau_final = compute_tau(lam_curr)
-    
-        # Prevent floating overflow for positive tau (dereddening) as original code:
-        flux_out = np.where(tau_final < 10.0, flux_curr * np.exp(tau_final), 0.0)
-        for idx, tval in enumerate(tau_final):
-            if tval >= 10.0:
-                # Optionally warn once, matching original behavior (original warns per time >10)
-                # But to avoid excessive printing, warn only if info True
-                if info:
-                    print("Warning: In Lyman alpha correction tau >= 10. Flux set to 0.0 at some points.")
-                # zeroed already by np.where
-    
-        # # Apply Lyman edge multiplicative factor for wavelengths between XLYEDGE and smallest XLAM
-        # TAULYMEDGE = ENH * C0[0]
-        # EXPTAULYMEDGE = np.exp(TAULYMEDGE) if TAULYMEDGE < 10.0 else 0.0
-        # # find indices that are between XLYEDGE and last XLAM (smallest XLAM value)
-        # lam_min_line = XLAM[-1]  # note: XLAM is sorted descending? but original used XLAM[-1], keep that semantics
-        # # apply factor for lam where lam < XLAM[-1] and lam > XLYEDGE
-        # mask = (lam_curr < XLAM[-1]) & (lam_curr > XLYEDGE)
-        # lam_curr[mask]  # no-op to emphasize use
-        # flux_out[mask] = flux_out[mask] * EXPTAULYMEDGE
-    
+                    print(
+                        "ISMLINE: cut_ism window does not overlap spectrum. "
+                        "Returning unmodified dataset."
+                    )
+                return np.array([lam_full, flux_full])
+            lam_left = lam_full[lam_full < winlo]
+            flux_left = flux_full[lam_full < winlo]
+            lam_right = lam_full[lam_full > winhi]
+            flux_right = flux_full[lam_full > winhi]
+            lam = lam_full[mid_mask].copy()
+            flux = flux_full[mid_mask].copy()
+        else:
+            winlo = winhi = None
+            lam_left = flux_left = lam_right = flux_right = np.empty(0)
+            lam = lam_full
+            flux = flux_full
+
+        # ------------------------------------------------------------------
+        # Batch expand: same quadratic insert grid as ismline.f (j=-500..500)
+        # ------------------------------------------------------------------
+        j = np.arange(-500, 501, dtype=np.float64)
+        # np.sign(0)=0 → centre point is XLAM (Fortran SIGN(1,0)*0=0)
+        xins = XLAM + np.sign(j) * j * j * 0.0001
+        xlammin = lam[0]
+        xlammax = lam[-1]
+        xins = xins[(xins >= xlammin) & (xins <= xlammax)]
+
+        # Keep only points not already on the grid (exact match like INSERTPOINT)
+        if xins.size:
+            idx = np.searchsorted(lam, xins)
+            idx = np.clip(idx, 0, lam.size - 1)
+            already = (lam[idx] == xins) | (
+                (idx > 0) & (lam[idx - 1] == xins)
+            )
+            xnew = xins[~already]
+            if xnew.size:
+                ynew = np.interp(xnew, lam, flux)
+                lam = np.concatenate([lam, xnew])
+                flux = np.concatenate([flux, ynew])
+                order = np.argsort(lam, kind="mergesort")
+                lam = lam[order]
+                flux = flux[order]
+
         if info:
-            print(f"HLYMANA: Dataset expanded to {len(lam_curr)} Datapoints after adaptive refinement (iters={iter_count}).")
-    
-        return np.array([lam_curr, flux_out])
+            if cut_ism:
+                print(
+                    f"ISMLINE: DATASET EXPANDED TO {len(lam):6d} DATA POINTS "
+                    f"(cut_ism=[{winlo:g}, {winhi:g}])"
+                )
+            else:
+                print(f"ISMLINE: DATASET EXPANDED TO {len(lam):6d} DATA POINTS ")
+
+        # ------------------------------------------------------------------
+        # Absorption profile (numba)
+        # ------------------------------------------------------------------
+        y = flux.copy()
+        use_voigt = (TEMP > 0.0) or (VTURB > 0.0)
+        if use_voigt:
+            if ATMASS > 0.0 and TEMP > 0.0:
+                dndopp = (
+                    XLAM * 1.0e-8 * QC
+                    * np.sqrt(
+                        2.0 * XKBOLTZ * TEMP / (XMP * ATMASS) + VTURB * VTURB
+                    )
+                )
+            else:
+                dndopp = XLAM * 1.0e-8 * QC * VTURB
+            qdndopp = 1.0 / dndopp
+            a_voigt = (
+                0.25 * GAMM * QPI * qdndopp
+                * XLAM * 1.0e-8 * XLAM * 1.0e-8 * QC
+            )
+            fak = (
+                FRBB * FVALUE * qdndopp
+                * XLAM * 1.0e-8 * XLAM * 1.0e-8 * QC
+            )
+            y = _ismline_apply_voigt(lam, y, XLAM, a_voigt, fak, ENH, qdndopp)
+        else:
+            y = _ismline_apply_lorentz(lam, y, XLAM, C0, C1, ENH)
+
+        # stitch unmodified continuum back on
+        if cut_ism:
+            parts_x = []
+            parts_y = []
+            if lam_left.size:
+                parts_x.append(lam_left)
+                parts_y.append(flux_left)
+            parts_x.append(lam)
+            parts_y.append(y)
+            if lam_right.size:
+                parts_x.append(lam_right)
+                parts_y.append(flux_right)
+            lam = np.concatenate(parts_x)
+            y = np.concatenate(parts_y)
+
+        return np.array([lam, y])
