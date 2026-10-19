@@ -1701,6 +1701,7 @@ class wrplotter:
         """
         normalized (!!!) VOIGT function H(a,v)
         according to the implementation of Detlef Köster
+        (1:1 translation of FUNCTION VOIGTH in wrplot.f)
         """
         wpi = 1.77245385
         v = abs(v)
@@ -1711,9 +1712,9 @@ class wrplotter:
             return h/wpi
         if a >= 0.2 and ((a > 1.4) or ((a + v) > 3.2)):
             aa = a*a
-            u = (aa+vv)-1.4142
+            u = (aa+vv)*1.4142
             uu = u*u
-            h = ((((aa-10.*vv)*aa*3.+15.*vv*vv)/uu+3.*vv-aa)/uu+1.)*A*0.79788/u
+            h = ((((aa-10.*vv)*aa*3.+15.*vv*vv)/uu+3.*vv-aa)/uu+1.)*a*0.79788/u
             return h/wpi
         h0 = np.exp(-vv)
         h2 = (1.-2.*vv)*h0
@@ -3102,227 +3103,180 @@ class wrplotter:
                 if center+offs < xmax:
                     text_boxes.append(self.__plot_idmult(text[i],wavelenghts[i],id_xoff=offs,id_y=id_ys[i],id_len=id_len,id_fontsize=id_fontsize,id_linesize=id_linesize,id_horizontal=id_horizontal,color=color,bbox_alpha=bbox_alpha))
     
-    def command_ismline(self,dataset,coldens,l0,fvalue,gamm,atmass=None,vrad=0.0,temp=-1.0,vturb=0.0,expand=True,window=5.0,info=False):
+    def command_ismline(self, dataset, coldens, l0, fvalue, gamm,
+                        atmass=None, vrad=0.0, temp=-273.15, vturb=0.0,
+                        info=False):
         """
-        Apply a single ISM absorption-line correction.
-    
+        Correct a UV spectrum for extinction by a single interstellar line.
+
+        1:1 Python translation of SUBROUTINE ISMLINE in wrplot.f.
+
         Parameters
         ----------
-        dataset : [wave, flux]
+        dataset : array-like
+            [wavelength / Angstrom, flux]. Must be monotonic in wavelength.
         coldens : float
-            Column density [cm^-2].
-    
-            WRPLOT convention:
-            coldens < 0 => absorption
-            coldens > 0 => emission-like correction
-    
+            Column density [cm^-2]. WRPLOT convention: negative => absorption
+            (Y is multiplied by exp(tau) with tau proportional to coldens).
         l0 : float
-            Rest wavelength [Angstrom]
-    
+            Rest wavelength [Angstrom] (keyword L0).
         fvalue : float
-            Oscillator strength
-    
+            Oscillator strength (keyword F).
         gamm : float
-            Damping constant [s^-1]
-    
-        atmass : float
-            Atomic mass [amu]
-    
+            Damping constant / lifetime parameter [s^-1] (keyword GAMM).
+        atmass : float, optional
+            Atomic mass [amu] (keyword A). Required if temp > 0.
         vrad : float
-            Radial velocity [km/s]
-    
+            Radial velocity [km/s] (keyword VRAD).
         temp : float
-            Temperature [K]
-    
+            Temperature [K] (keyword T). Default -273.15 matches Fortran.
+            If temp > 0 or vturb > 0 a Voigt profile is used, else Lorentz.
         vturb : float
-            Turbulent velocity [km/s]
-    
-        window : float
-            Region around line center where the profile is evaluated.
+            Turbulent velocity [km/s] (keyword VTURB).
+        info : bool
+            If True, print the Fortran-style expansion message.
+
+        Returns
+        -------
+        np.ndarray
+            Modified [wavelength, flux] dataset (grid may be expanded).
         """
-    
-        # ------------------------------------------------------------------
-        # constants
-        # ------------------------------------------------------------------
-    
+        import contextlib
+        import io
+
+        # --- constants (identical to ismline.f) ---
         CLIGHT = 299792.458
-    
         XKBOLTZ = 1.38065000e-16
-        CLCM    = 2.99792458e10
-        ECHAR   = 4.80325000e-10
-        XME     = 9.10938190e-28
-        XMP     = 1.67262160e-24
-    
-        PI = np.pi
+        CLCM = 2.99792458e10
+        ECHAR = 4.80325000e-10
+        XME = 9.10938190e-28
+        XMP = 1.67262160e-24
+
+        PI = 4.0 * np.arctan(1.0)
         QPI = 1.0 / PI
         QC = 1.0 / CLCM
-    
-        FRBB = PI * ECHAR * ECHAR / (XME * CLCM)
-    
-        # ------------------------------------------------------------------
-        # sanity checks
-        # ------------------------------------------------------------------
-    
-        if fvalue <= 0:
-            raise ValueError("FVALUE must be > 0")
-    
-        if gamm <= 0:
-            raise ValueError("GAMM must be > 0")
-    
-        if l0 <= 0:
-            raise ValueError("L0 must be > 0")
-    
-        if coldens == 0:
-            raise ValueError("COLDENS cannot be zero")
-    
-        if temp > 0 and (atmass is None or atmass <= 0):
-            raise ValueError("ATMASS required when TEMP > 0")
-    
-        # ------------------------------------------------------------------
-        # sort spectrum if needed
-        # ------------------------------------------------------------------
-    
-        if not np.all(np.diff(dataset[0]) > 0):
+        FRBB = PI * ECHAR * ECHAR / XME / CLCM
+
+        TEMP = float(temp)
+        VTURB = float(vturb)
+        VRAD = float(vrad)
+        FVALUE = float(fvalue)
+        ATMASS = 0.0 if atmass is None else float(atmass)
+        XLAM = float(l0)
+        GAMM = float(gamm)
+        ENH = float(coldens)
+
+        # --- consistency checks (same messages / conditions as Fortran) ---
+        if FVALUE <= 0.0:
+            raise ValueError(
+                "ISMLINE : Oscillator strenght F is missing or wrong."
+            )
+        if GAMM <= 0.0:
+            raise ValueError(
+                "ISMLINE : Lifetime GAMM is missing or wrong."
+            )
+        if XLAM <= 0.0:
+            raise ValueError(
+                "ISMLINE : Wavelength L0 is missing or wrong."
+            )
+        if ATMASS <= 0.0 and TEMP > 0.0:
+            raise ValueError(
+                "ISMLINE : Atomic mass A for option T is missing or wrong."
+            )
+        if ENH == 0.0:
+            raise ValueError(
+                "ISM : Column density COLDENS is missing or zero."
+            )
+
+        # Apply radial velocity shift; convert turbulence km/s -> cm/s
+        XLAM = XLAM * (1.0 + VRAD / CLIGHT)
+        VTURB = VTURB * 1.0e5
+
+        # Lorentz coefficients (only used if no Voigt)
+        if TEMP <= 0.0 and VTURB <= 0.0:
+            C0 = (4.0 * PI * ECHAR * ECHAR / (XME * CLCM * GAMM)) * FVALUE
+            C1 = (4.0 * PI * CLCM / (XLAM * 1.0e-8 * XLAM * 1.0e-8 * GAMM)) ** 2
+
+        # Dataset must be monotonic (INSERTPOINT assumption)
+        if not np.all(np.diff(dataset[0]) >= 0):
+            if info:
+                print("Warning: Dataset not monotonic. Sorting.")
             dataset = self.command_sort(dataset)
-    
-        x = np.asarray(dataset[0], dtype=float)
-        y = np.asarray(dataset[1], dtype=float)
-    
+
         # ------------------------------------------------------------------
-        # radial velocity shift
+        # EXPAND DATA TO INSERT ISM LINE  (ismline.f lines ~30886-30912)
         # ------------------------------------------------------------------
-    
-        xlam = l0 * (1.0 + vrad / CLIGHT)
-    
-        # km/s -> cm/s
-        vturb_cgs = vturb * 1.0e5
-    
-        # ------------------------------------------------------------------
-        # expand wavelength grid
-        # ------------------------------------------------------------------
-    
-        if expand:
-    
-            dlambda = 1.0e-4
-    
-            for j in range(-500, 501):
-    
-                xins = xlam + np.sign(j) * j * j * dlambda
-    
-                if abs(xins - xlam) <= window:
-                    dataset = self.command_insert(dataset, xins)
-    
-            x = np.asarray(dataset[0], dtype=float)
-            y = np.asarray(dataset[1], dtype=float)
-    
-            if info:
-                print(f"ISMLINE: dataset expanded to {len(x)} points")
-    
-        # ------------------------------------------------------------------
-        # local window
-        # ------------------------------------------------------------------
-    
-        loc_mask = np.abs(x - xlam) <= window
-        idx = np.where(loc_mask)[0]
-    
-        if len(idx) == 0:
-            return np.array([x, y])
-    
-        # ------------------------------------------------------------------
-        # initialize output
-        # ------------------------------------------------------------------
-    
-        yout = y.copy()
-    
-        # ------------------------------------------------------------------
-        # Voigt profile
-        # ------------------------------------------------------------------
-    
-        if temp > 0 or vturb > 0:
-    
-            if temp > 0:
-    
-                vdopp = np.sqrt(
-                    2.0 * XKBOLTZ * temp /
-                    (XMP * atmass)
-                    + vturb_cgs * vturb_cgs
-                )
-    
-                dndopp = xlam * 1.0e-8 * QC * vdopp
-    
-            else:
-    
-                dndopp = xlam * 1.0e-8 * QC * vturb_cgs
-    
-            qdndopp = 1.0 / dndopp
-    
-            a = (
-                0.25 * gamm * QPI *
-                qdndopp *
-                (xlam * 1.0e-8)**2 *
-                QC
-            )
-    
-            fak = (
-                FRBB *
-                fvalue *
-                qdndopp *
-                (xlam * 1.0e-8)**2 *
-                QC
-            )
-    
-            tau_min = 0.0
-    
-            for i in idx:
-    
-                dlam = x[i] - xlam
-    
-                v = abs(dlam) * 1.0e-8 * qdndopp
-    
-                hh = self.voigth(a, v)
-    
-                tau = fak * hh * coldens
-    
-                tau_min = min(tau_min, tau)
-    
-                if tau < 10.0:
-                    yout[i] *= np.exp(tau)
+        XLAMMIN = float(np.min(dataset[0]))
+        XLAMMAX = float(np.max(dataset[0]))
+        DLAMBDA = 0.0001
+        # Suppress command_insert chatter on already-existing points
+        with contextlib.redirect_stdout(io.StringIO()):
+            for J in range(-500, 501):
+                # Fortran: SIGN(1,J)*J*J*DLAMBDA; SIGN(1,0)=+1 but J*J=0
+                if J == 0:
+                    XINS = XLAM
                 else:
-                    yout[i] = 0.0
-    
-            if info:
-                print("ISMLINE: tau_min =", tau_min)
-    
+                    XINS = XLAM + np.sign(J) * J * J * DLAMBDA
+                XDL1 = XLAMMIN - XINS
+                XDR1 = XLAMMAX - XINS
+                if XDL1 * XDR1 > 0.0:
+                    continue
+                dataset = self.command_insert(dataset, XINS)
+
+        IDAT = len(dataset[0])
+        if info:
+            print(f"ISMLINE: DATASET EXPANDED TO {IDAT:6d} DATA POINTS ")
+
         # ------------------------------------------------------------------
-        # Lorentz profile
+        # MULTIPLICATION WITH ABSORPTION PROFILE
         # ------------------------------------------------------------------
-    
-        else:
-    
-            c0 = (
-                4.0 * PI * ECHAR * ECHAR /
-                (XME * CLCM * gamm)
-            ) * fvalue
-    
-            c1 = (
-                4.0 * PI * CLCM /
-                ((xlam * 1.0e-8)**2 * gamm)
-            )**2
-    
-            dlam = (x[idx] - xlam) * 1.0e-8
-    
-            tau = c0 * coldens / (1.0 + c1 * dlam * dlam)
-    
-            if info:
-                print("ISMLINE: tau_min =", np.min(tau))
-    
-            good = tau < 10.0
-    
-            yout[idx[good]] *= np.exp(tau[good])
-            yout[idx[~good]] = 0.0
-    
-        return np.array([x, yout])
-        
+        x = np.asarray(dataset[0], dtype=np.float64)
+        y = np.asarray(dataset[1], dtype=np.float64).copy()
+
+        use_voigt = (TEMP > 0.0) or (VTURB > 0.0)
+
+        for I in range(IDAT):
+            TAU = 0.0
+
+            if use_voigt:
+                # Doppler width Delta lambda in cm
+                if ATMASS > 0.0 and TEMP > 0.0:
+                    DNDOPP = (
+                        XLAM * 1.0e-8 * QC
+                        * np.sqrt(
+                            2.0 * XKBOLTZ * TEMP / (XMP * ATMASS)
+                            + VTURB * VTURB
+                        )
+                    )
+                else:
+                    DNDOPP = XLAM * 1.0e-8 * QC * VTURB
+                QDNDOPP = 1.0 / DNDOPP
+                # Constant "A" for normalized Voigt function
+                A = (
+                    0.25 * GAMM * QPI * QDNDOPP
+                    * XLAM * 1.0e-8 * XLAM * 1.0e-8 * QC
+                )
+                DLAM = x[I] - XLAM
+                V = abs(DLAM) * 1.0e-8 * QDNDOPP
+                HH = self.voigth(A, V)
+                # Factor in cm
+                FAK = (
+                    FRBB * FVALUE * QDNDOPP
+                    * XLAM * 1.0e-8 * XLAM * 1.0e-8 * QC
+                )
+                # Sign is plus as COLDENS is negative for absorption
+                TAU = TAU + FAK * HH * ENH
+            else:
+                DLAM = (x[I] - XLAM) * 1.0e-8
+                TAU = TAU + C0 * ENH / (1.0 + C1 * DLAM * DLAM)
+
+            if TAU < 10.0:
+                y[I] = y[I] * np.exp(TAU)
+            else:
+                y[I] = 0.0
+
+        return np.array([x, y])
+
     def command_ismline_fast(self,dataset,coldens,l0,fvalue,gamm,atmass=None,vrad=0.0,temp=-1.0,vturb=0.0,window=5.0,info=False):
         """
         Apply corrections for interstellar absorption by hydrogen Lyman lines (from Lyα to Ly20).
