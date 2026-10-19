@@ -261,8 +261,8 @@ def make_plots():
         title=f"CONVOL timing (N={len(data[0])} pts, continuum_flat.dat)",
         outfile="convol_timing.txt",
         notes=[
-            "slow = command_convol,  fast = command_convol_fast",
-            "Gauss/box slow and fast share the same numba kernel (~1x).",
+            "slow = command_convol (pure-Python CONVEX/CONVADD)",
+            "fast = command_convol_fast (numba kernels)",
         ],
     )
     return results

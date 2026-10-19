@@ -114,37 +114,42 @@ def _convol_rot_kernel(x, y, d_angstrom, beta):
     return out
 
 
-def _convol_rot_python(x, y, d_angstrom, beta):
-    """
-    Pure-Python rotational convolution (1:1 CONVEX loop for CHAR='R').
+def _local_spacing_python(x, k, n):
+    """CONVADD local |Δx| weight (pure Python)."""
+    if n < 2:
+        return 1.0
+    if 0 < k < n - 1:
+        return abs((x[k + 1] - x[k - 1]) * 0.5)
+    if k == 0:
+        return abs(x[0] - x[1])
+    return abs(x[n - 2] - x[n - 1])
 
-    Used by ``command_convol``; ``command_convol_fast`` uses the numba twin
-    ``_convol_rot_kernel``.
+
+def _convol_convex_python(x, y, d, p, kernel):
+    """
+    Pure-Python 1:1 port of WRPLOT SUBROUTINE CONVEX + CONVADD.
+
+    Parameters
+    ----------
+    d : float
+        Fortran ``D`` (already scaled for GAUSS: D = FWHM * 0.6006).
+    p : float
+        Cutoff on |XA| = |Δλ|/D  (3 for GAUSS, 1 for BOX/ROT).
+    kernel : callable
+        ``kernel(xa) -> G`` matching CONVADD CHAR branch (before ×|Δx|).
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     n = len(x)
     out = np.zeros(n)
-    twobypi = 0.6366197723675814  # 2/π
-    d = float(d_angstrom)
-    beta = float(beta)
-
-    def spacing(k):
-        if n < 2:
-            return 1.0
-        if 0 < k < n - 1:
-            return abs((x[k + 1] - x[k - 1]) * 0.5)
-        if k == 0:
-            return abs(x[0] - x[1])
-        return abs(x[n - 2] - x[n - 1])
+    d = float(d)
+    p = float(p)
 
     def add(L, K, acc, S):
         xa = (x[K] - x[L]) / d if K != L else 0.0
-        if abs(xa) >= 1.0 and K != L:
+        if abs(xa) >= p and K != L:
             return acc, S, False
-        xa2 = xa * xa
-        g = twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
-        g = g * spacing(K)
+        g = kernel(xa) * _local_spacing_python(x, K, n)
         return acc + g * y[K], S + g, True
 
     for L in range(n):
@@ -165,6 +170,44 @@ def _convol_rot_python(x, y, d_angstrom, beta):
             K += 1
         out[L] = acc / S if S != 0.0 else 0.0
     return out
+
+
+def _convol_gauss_python(x, y, fwhm):
+    """
+    Pure-Python Gaussian convolution (CONVEX CHAR='G').
+
+    Fortran: D = FWHM * 0.6006, P = 3, G = exp(-XA²).
+    Used by ``command_convol``; fast path uses ``_convol_gauss_kernel``.
+    """
+    d = float(fwhm) * 0.6006
+    return _convol_convex_python(x, y, d, 3.0, lambda xa: np.exp(-xa * xa))
+
+
+def _convol_box_python(x, y, width):
+    """
+    Pure-Python box/Kasten convolution (CONVEX CHAR='K').
+
+    Fortran: D = half-width, P = 1, G = 1.
+    Used by ``command_convol``; fast path uses ``_convol_box_kernel``.
+    """
+    return _convol_convex_python(x, y, float(width), 1.0, lambda xa: 1.0)
+
+
+def _convol_rot_python(x, y, d_angstrom, beta):
+    """
+    Pure-Python rotational convolution (1:1 CONVEX loop for CHAR='R').
+
+    Used by ``command_convol``; ``command_convol_fast`` uses the numba twin
+    ``_convol_rot_kernel``.
+    """
+    twobypi = 0.6366197723675814  # 2/π
+    beta = float(beta)
+
+    def kernel(xa):
+        xa2 = xa * xa
+        return twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
+
+    return _convol_convex_python(x, y, float(d_angstrom), 1.0, kernel)
 
 
 # ---------------------------------------------------------------------------
@@ -1311,13 +1354,11 @@ class wrplotter:
             
     def command_convol(self, dataset, shape="gaussian", value=0, beta=0):
         """    
-        Convolution of a dataset with a given function/shape.
+        Convolution — pure-Python 1:1 port of WRPLOT CONVEX + CONVADD.
 
-        Sample weights follow WRPLOT CONVADD: kernel(Δλ) × local spacing
-        |Δx|, so results stay correct on non-uniform grids (e.g. after
-        ISMLINE inserts a dense core). On a uniform grid this is identical
-        to unweighted kernel normalization.
-        
+        Sample weights follow CONVADD: kernel(Δλ) × local spacing |Δx|.
+        Use ``command_convol_fast`` for the numba-accelerated twin.
+
         Parameters
         ----------
         dataset: np.array or list or int
@@ -1327,7 +1368,7 @@ class wrplotter:
             Possible options: "gauss" or gaussian", "box" or "kasten", "rot" or "rotation"
         value: float default: 0
             Kernel width parameter:
-            If shape == "gauss", FWHM [Å].
+            If shape == "gauss", FWHM [Å] (Fortran scales D = FWHM·0.6006).
             If shape == "box", half-width of the box [Å].
             If shape == "rot", Δλ_max [Å] (WRPLOT ``D``) — fixed wavelength
             half-width of the Unsoeld rotation profile (not vsini in km/s).
@@ -1352,12 +1393,10 @@ class wrplotter:
 
         shape = shape.lower()
         if shape in ("gauss", "gaussian"):
-            sigma = value / 2.354820045  # FWHM = 2 sqrt(2 ln(2)) stddev
-            y_new = _convol_gauss_kernel(x, y, sigma, 4.5 * sigma)
+            y_new = _convol_gauss_python(x, y, value)
         elif shape in ("box", "kasten"):
-            y_new = _convol_box_kernel(x, y, value)
+            y_new = _convol_box_python(x, y, value)
         elif shape in ("rot", "rotation"):
-            # Pure-Python WRPLOT loop (slow path); fast uses numba twin
             y_new = _convol_rot_python(x, y, value, beta)
         else:
             raise ValueError(f"Unknown convolution shape: {shape}")
