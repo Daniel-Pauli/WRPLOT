@@ -1,15 +1,16 @@
 HLYMANA timing
 ==============
 
-slow = command_hlymana,  fast = command_hlymana_fast
+slow = command_hlymana_original,  fast = command_hlymana
 cut = cut_lyman window; full = entire spectrum
+speedup = t(slow) / t(fast)  for that case
 
-case                          slow          fast     speedup    max|d| vs WRPLOT
---------------------  ------------  ------------  ----------  ------------------
-flat N=-1e+20 (cut)      721.39 ms       2.18 ms      331.5x            4.97e-06
-flat N=-1e+20 (full)     721.39 ms       1.76 ms      409.2x            4.97e-06
-flat N=-5e+20 (cut)      713.22 ms       2.14 ms      333.9x            2.52e-06
-flat N=-5e+20 (full)     713.22 ms       1.84 ms      386.8x            2.52e-06
-flat N=-1e+21 (cut)      726.97 ms       2.06 ms      353.5x            1.75e-06
-flat N=-1e+21 (full)     726.97 ms       1.83 ms      398.0x            1.75e-06
-UV N=-1e20 (cut)         587.36 ms       2.87 ms      204.3x            3.85e-06
+case                       slow     fast  speedup  max|d| vs WRPLOT
+--------------------  ---------  -------  -------  ----------------
+flat N=-1e+20 (cut)   718.24 ms  2.44 ms   294.1x          4.97e-06
+flat N=-1e+20 (full)  718.24 ms  1.87 ms   384.8x          4.97e-06
+flat N=-5e+20 (cut)   717.06 ms  1.97 ms   363.8x          2.52e-06
+flat N=-5e+20 (full)  717.06 ms  1.85 ms   387.5x          2.52e-06
+flat N=-1e+21 (cut)   706.54 ms  1.96 ms   361.3x          1.75e-06
+flat N=-1e+21 (full)  706.54 ms  1.80 ms   392.3x          1.75e-06
+UV N=-1e20 (cut)      572.55 ms  2.98 ms   192.2x          3.85e-06

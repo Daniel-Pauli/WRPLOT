@@ -2,13 +2,13 @@ ISMLINE + CONVOL GAUSS=0.5 timing
 =================================
 
 Pipeline: ISMLINE GAL+SMC → SORT → CONVOL GAUSS=0.5
-slow+slow = command_ismline + command_convol
-fast+fast = command_ismline_fast (full) + command_convol_fast
-fast_cut+fast = command_ismline_fast (cut window) + command_convol_fast
+slow+slow = command_ismline_original + command_convol_original
+fast+fast = command_ismline (full) + command_convol
+fast_cut+fast = command_ismline (cut window) + command_convol
 speedup = t(slow+slow) / t(case)
 
 case               time  speedup  max|d| vs WRPLOT
 -------------  --------  -------  ----------------
-slow+slow      10.414 s     1.0x          2.10e-05
-fast+fast      21.40 ms   486.5x          2.10e-05
-fast_cut+fast  21.05 ms   494.8x          2.10e-05
+slow+slow      13.585 s     1.0x          7.10e-07
+fast+fast      22.07 ms   615.6x          7.10e-07
+fast_cut+fast  22.19 ms   612.1x          7.10e-07

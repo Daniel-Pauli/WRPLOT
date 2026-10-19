@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Validation + speedup suite for command_convol / command_convol_fast.
+Validation + speedup suite for command_convol_original / command_convol.
 
 Covers Gaussian, box, and rotational kernels with several widths / β values.
 Tolerance between slow and fast: ATOL_FLUX (1e-4); exact path uses ~machine eps.
@@ -36,16 +36,16 @@ class TestConvolAgreement(unittest.TestCase):
     def setUpClass(cls):
         cls.w = get_wrplotter()
         tiny = synthetic_absorption(n=200)
-        cls.w.command_convol_fast(tiny, "gauss", 0.5)
-        cls.w.command_convol_fast(tiny, "box", 1.0)
-        cls.w.command_convol_fast(tiny, "rot", 1.0, beta=0.0)
+        cls.w.command_convol(tiny, "gauss", 0.5)
+        cls.w.command_convol(tiny, "box", 1.0)
+        cls.w.command_convol(tiny, "rot", 1.0, beta=0.0)
 
     def test_gauss_slow_fast_various_fwhm(self):
         data = synthetic_absorption(n=6000)
         for fwhm in (0.2, 0.5, 1.0, 2.5):
             with self.subTest(fwhm=fwhm):
-                slow = self.w.command_convol(data, "gauss", fwhm)
-                fast = self.w.command_convol_fast(
+                slow = self.w.command_convol_original(data, "gauss", fwhm)
+                fast = self.w.command_convol(
                     data, "gauss", fwhm, precision=None
                 )
                 d = max_abs_diff(slow[1], fast[1], slow[0], fast[0])
@@ -55,8 +55,8 @@ class TestConvolAgreement(unittest.TestCase):
         data = synthetic_absorption(n=6000)
         for width in (0.5, 1.0, 2.0, 5.0):
             with self.subTest(width=width):
-                slow = self.w.command_convol(data, "box", width)
-                fast = self.w.command_convol_fast(
+                slow = self.w.command_convol_original(data, "box", width)
+                fast = self.w.command_convol(
                     data, "box", width, precision=None
                 )
                 d = max_abs_diff(slow[1], fast[1])
@@ -67,8 +67,8 @@ class TestConvolAgreement(unittest.TestCase):
         d_ang = 2.5
         for beta in (0.0, 0.3, 0.6, 1.0):
             with self.subTest(beta=beta):
-                slow = self.w.command_convol(data, "rot", d_ang, beta=beta)
-                fast = self.w.command_convol_fast(
+                slow = self.w.command_convol_original(data, "rot", d_ang, beta=beta)
+                fast = self.w.command_convol(
                     data, "rot", d_ang, beta=beta, precision=None
                 )
                 d = max_abs_diff(slow[1], fast[1])
@@ -83,14 +83,14 @@ class TestConvolAgreement(unittest.TestCase):
         ])
         y = 1.0 - 0.9 * np.exp(-0.5 * ((x - 5000.0) / 0.1) ** 2)
         data = np.array([x, y])
-        slow = self.w.command_convol(data, "gauss", 0.5)
-        fast = self.w.command_convol_fast(data, "gauss", 0.5, precision=None)
+        slow = self.w.command_convol_original(data, "gauss", 0.5)
+        fast = self.w.command_convol(data, "gauss", 0.5, precision=None)
         self.assertLess(max_abs_diff(slow[1], fast[1]), ATOL_FLUX)
 
     def test_value_zero_noop(self):
         data = synthetic_absorption(n=100)
         for shape in ("gauss", "box", "rot"):
-            out = self.w.command_convol(data, shape, 0.0)
+            out = self.w.command_convol_original(data, shape, 0.0)
             np.testing.assert_array_equal(out[1], data[1])
 
     def test_vs_wrplot_gauss_box_rot(self):
@@ -107,7 +107,7 @@ class TestConvolAgreement(unittest.TestCase):
                     self.skipTest(f"{path.name} missing — run ./run_wrplot_refs.sh")
                 ref = load_ref(path)
                 out = quiet(
-                    self.w.command_convol, data, shape, value, beta=beta
+                    self.w.command_convol_original, data, shape, value, beta=beta
                 )
                 st = compare_in_window(
                     out, ref[:, 0], ref[:, 1], 4850.0, 5150.0
@@ -125,10 +125,10 @@ class TestConvolSpeed(unittest.TestCase):
                                     centers=[(4900, 0.7, 0.12),
                                              (5000, 0.9, 0.10),
                                              (5100, 0.6, 0.15)])
-        w.command_convol_fast(data, "rot", 2.5, beta=0.4)  # warmup
-        _, t_slow = time_call(w.command_convol, data, "rot", 2.5, beta=0.4, n=3)
+        w.command_convol(data, "rot", 2.5, beta=0.4)  # warmup
+        _, t_slow = time_call(w.command_convol_original, data, "rot", 2.5, beta=0.4, n=3)
         _, t_fast = time_call(
-            w.command_convol_fast, data, "rot", 2.5, beta=0.4,
+            w.command_convol, data, "rot", 2.5, beta=0.4,
             precision=None, n=3,
         )
         self.assertLess(t_fast, t_slow)
@@ -140,9 +140,9 @@ def make_plots():
     print("\n=== CONVOL validation plots ===")
     w = get_wrplotter()
     data = load_continuum_flat(w)
-    quiet(w.command_convol_fast, data, "gauss", 0.5)
-    quiet(w.command_convol_fast, data, "box", 1.0)
-    quiet(w.command_convol_fast, data, "rot", 2.5, beta=0.0)
+    quiet(w.command_convol, data, "gauss", 0.5)
+    quiet(w.command_convol, data, "box", 1.0)
+    quiet(w.command_convol, data, "rot", 2.5, beta=0.0)
 
     # Cases that match tests/test.plot CONVOL plots (have WRPLOT refs)
     wrplot_cases = [
@@ -161,10 +161,10 @@ def make_plots():
     print(f"{'case':28s}  {'slow':>10s}  {'fast':>10s}  {'vsWR':>10s}  {'s/f':>6s}")
     for shape, value, beta, label, ref_path in wrplot_cases:
         slow, t_slow = time_call(
-            w.command_convol, data, shape, value, beta=beta, n=5
+            w.command_convol_original, data, shape, value, beta=beta, n=5
         )
         fast, t_fast = time_call(
-            w.command_convol_fast, data, shape, value, beta=beta,
+            w.command_convol, data, shape, value, beta=beta,
             precision=None, n=5,
         )
         ref = load_ref(ref_path) if ref_path.is_file() else None
@@ -246,10 +246,10 @@ def make_plots():
     ]
     for shape, value, beta, label in timing_extra:
         _, t_slow = time_call(
-            w.command_convol, data, shape, value, beta=beta, n=3
+            w.command_convol_original, data, shape, value, beta=beta, n=3
         )
         _, t_fast = time_call(
-            w.command_convol_fast, data, shape, value, beta=beta,
+            w.command_convol, data, shape, value, beta=beta,
             precision=None, n=3,
         )
         timing_rows.append(dict(
@@ -261,8 +261,8 @@ def make_plots():
         title=f"CONVOL timing (N={len(data[0])} pts, continuum_flat.dat)",
         outfile="convol_timing.txt",
         notes=[
-            "slow = command_convol (pure-Python CONVEX/CONVADD)",
-            "fast = command_convol_fast (numba kernels)",
+            "slow = command_convol_original (pure-Python CONVEX/CONVADD)",
+            "fast = command_convol (numba kernels)",
         ],
     )
     return results

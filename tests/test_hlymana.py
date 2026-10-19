@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Validation + speedup suite for command_hlymana / command_hlymana_fast.
+Validation + speedup suite for command_hlymana_original / command_hlymana.
 
 Checks Lyman-edge τ (C0[NHI]), slow↔fast agreement, and speedup across
 several column densities. Uses UV_spectrum.txt when available.
@@ -41,7 +41,7 @@ class TestHlymanaPhysics(unittest.TestCase):
     def setUpClass(cls):
         cls.w = get_wrplotter()
         tiny = flat_continuum(1210.0, 1220.0, n=50)
-        quiet(cls.w.command_hlymana_fast, tiny, key="coldens", value=-1e19,
+        quiet(cls.w.command_hlymana, tiny, key="coldens", value=-1e19,
               cut_lyman=False)
 
     def test_taulymedge_tracks_c0_nhi(self):
@@ -49,7 +49,7 @@ class TestHlymanaPhysics(unittest.TestCase):
         expected = np.exp(ENH * C0_NHI)
         wrong = np.exp(ENH * C0_LYA)
         data = flat_continuum(911.4, 912.8, n=4000)
-        out = quiet(self.w.command_hlymana, data, key="coldens", value=ENH)
+        out = quiet(self.w.command_hlymana_original, data, key="coldens", value=ENH)
         edge = (out[0] > XLYEDGE + 0.05) & (out[0] < XLAM_NHI - 0.05)
         red = (out[0] > XLAM_NHI + 0.02) & (out[0] < XLAM_NHI + 0.08)
         self.assertTrue(np.any(edge) and np.any(red))
@@ -58,16 +58,16 @@ class TestHlymanaPhysics(unittest.TestCase):
 
     def test_no_duplicate_wavelengths(self):
         data = flat_continuum(1200.0, 1225.0, n=500)
-        out = quiet(self.w.command_hlymana, data, key="coldens", value=-1e21)
+        out = quiet(self.w.command_hlymana_original, data, key="coldens", value=-1e21)
         self.assertTrue(np.all(np.diff(out[0]) > 0))
 
     def test_slow_fast_various_coldens(self):
         data = flat_continuum(1180.0, 1250.0, n=6000)
         for N in (-1e19, -1e20, -5e20, -1e21):
             with self.subTest(N=N):
-                slow = quiet(self.w.command_hlymana, data,
+                slow = quiet(self.w.command_hlymana_original, data,
                              key="coldens", value=N)
-                fast = quiet(self.w.command_hlymana_fast, data,
+                fast = quiet(self.w.command_hlymana, data,
                              key="coldens", value=N, cut_lyman=False)
                 x = np.linspace(1205.0, 1225.0, 4000)
                 d = max_abs_diff(slow[1], fast[1], slow[0], fast[0], x_common=x)
@@ -77,8 +77,8 @@ class TestHlymanaPhysics(unittest.TestCase):
     def test_with_vturb(self):
         data = flat_continuum(1180.0, 1250.0, n=4000)
         kw = dict(key="coldens", value=-1e20, vturb=10.0, temp=10000.0)
-        slow = quiet(self.w.command_hlymana, data, **kw)
-        fast = quiet(self.w.command_hlymana_fast, data, cut_lyman=False, **kw)
+        slow = quiet(self.w.command_hlymana_original, data, **kw)
+        fast = quiet(self.w.command_hlymana, data, cut_lyman=False, **kw)
         x = np.linspace(1205.0, 1225.0, 2000)
         d = max_abs_diff(slow[1], fast[1], slow[0], fast[0], x_common=x)
         self.assertLess(d, 5e-2)
@@ -92,7 +92,7 @@ class TestHlymanaPhysics(unittest.TestCase):
                     self.skipTest(f"{path.name} missing — run ./run_wrplot_refs.sh")
                 ref = load_ref(path)
                 out = quiet(
-                    self.w.command_hlymana, data, key="coldens", value=N
+                    self.w.command_hlymana_original, data, key="coldens", value=N
                 )
                 st = compare_in_window(out, ref[:, 0], ref[:, 1], 920.0, 1280.0)
                 self.assertLess(
@@ -106,7 +106,7 @@ class TestHlymanaPhysics(unittest.TestCase):
         ref = load_ref(WRPLOT_REF_HLYMANA_UV)
         uv = load_uv(self.w)
         out = quiet(
-            self.w.command_hlymana, uv, key="coldens", value=-1.0e20
+            self.w.command_hlymana_original, uv, key="coldens", value=-1.0e20
         )
         st = compare_in_window(out, ref[:, 0], ref[:, 1], 920.0, 1280.0)
         self.assertLess(
@@ -122,12 +122,12 @@ class TestHlymanaSpeed(unittest.TestCase):
             uv = load_uv(w)
         except Exception:
             uv = flat_continuum(900.0, 1300.0, n=20000)
-        quiet(w.command_hlymana_fast, uv, key="coldens", value=-1e20)
+        quiet(w.command_hlymana, uv, key="coldens", value=-1e20)
         _, t_slow = time_call(
-            w.command_hlymana, uv, key="coldens", value=-1e20, n=1
+            w.command_hlymana_original, uv, key="coldens", value=-1e20, n=1
         )
         _, t_fast = time_call(
-            w.command_hlymana_fast, uv, key="coldens", value=-1e20, n=3
+            w.command_hlymana, uv, key="coldens", value=-1e20, n=3
         )
         self.assertLess(t_fast, t_slow)
         self.assertGreater(t_slow / t_fast, 2.0)
@@ -149,7 +149,7 @@ def make_plots():
         r"$N_\mathrm{H}=-5\times10^{20}$ (flat)",
         r"$N_\mathrm{H}=-10^{21}$ (flat)",
     ]
-    quiet(w.command_hlymana_fast, flat, key="coldens", value=coldens[0])
+    quiet(w.command_hlymana, flat, key="coldens", value=coldens[0])
 
     results = []
     print(
@@ -158,10 +158,10 @@ def make_plots():
     )
     for N in coldens:
         kw = dict(key="coldens", value=N, vrad=0.0, temp=-1, vturb=0)
-        slow, t_slow = time_call(w.command_hlymana, flat, n=1, **kw)
-        fast_c, t_cut = time_call(w.command_hlymana_fast, flat, n=2, **kw)
+        slow, t_slow = time_call(w.command_hlymana_original, flat, n=1, **kw)
+        fast_c, t_cut = time_call(w.command_hlymana, flat, n=2, **kw)
         fast_f, t_full = time_call(
-            w.command_hlymana_fast, flat, cut_lyman=False, n=2, **kw
+            w.command_hlymana, flat, cut_lyman=False, n=2, **kw
         )
         ref_path = WRPLOT_REF_HLYMANA.get(N)
         ref = load_ref(ref_path) if ref_path and ref_path.is_file() else None
@@ -180,8 +180,8 @@ def make_plots():
 
     # UV case (test.plot plot 6)
     kw_uv = dict(key="coldens", value=-1.0e20, vrad=0.0, temp=-1, vturb=0)
-    slow_uv, t_uv = time_call(w.command_hlymana, uv, n=1, **kw_uv)
-    fast_uv, t_uvf = time_call(w.command_hlymana_fast, uv, n=2, **kw_uv)
+    slow_uv, t_uv = time_call(w.command_hlymana_original, uv, n=1, **kw_uv)
+    fast_uv, t_uvf = time_call(w.command_hlymana, uv, n=2, **kw_uv)
     ref_uv = (
         load_ref(WRPLOT_REF_HLYMANA_UV)
         if WRPLOT_REF_HLYMANA_UV.is_file() else None
@@ -289,7 +289,7 @@ def make_plots():
         title="HLYMANA timing",
         outfile="hlymana_timing.txt",
         notes=[
-            "slow = command_hlymana,  fast = command_hlymana_fast",
+            "slow = command_hlymana_original,  fast = command_hlymana",
             "cut = cut_lyman window; full = entire spectrum",
         ],
     )

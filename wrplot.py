@@ -63,7 +63,7 @@ def _convol_box_kernel(x, y, width):
     """
     Discrete box convolution on an irregular but sorted wavelength grid.
 
-    Weights include local spacing (WRPLOT CONVADD), matching command_convol.
+    Weights include local spacing (WRPLOT CONVADD), matching command_convol_original.
     """
     n = len(x)
     out = np.empty(n)
@@ -177,7 +177,7 @@ def _convol_gauss_python(x, y, fwhm):
     Pure-Python Gaussian convolution (CONVEX CHAR='G').
 
     Fortran: D = FWHM * 0.6006, P = 3, G = exp(-XA²).
-    Used by ``command_convol``; fast path uses ``_convol_gauss_kernel``.
+    Used by ``command_convol_original``; fast path uses ``_convol_gauss_kernel``.
     """
     d = float(fwhm) * 0.6006
     return _convol_convex_python(x, y, d, 3.0, lambda xa: np.exp(-xa * xa))
@@ -188,7 +188,7 @@ def _convol_box_python(x, y, width):
     Pure-Python box/Kasten convolution (CONVEX CHAR='K').
 
     Fortran: D = half-width, P = 1, G = 1.
-    Used by ``command_convol``; fast path uses ``_convol_box_kernel``.
+    Used by ``command_convol_original``; fast path uses ``_convol_box_kernel``.
     """
     return _convol_convex_python(x, y, float(width), 1.0, lambda xa: 1.0)
 
@@ -197,7 +197,7 @@ def _convol_rot_python(x, y, d_angstrom, beta):
     """
     Pure-Python rotational convolution (1:1 CONVEX loop for CHAR='R').
 
-    Used by ``command_convol``; ``command_convol_fast`` uses the numba twin
+    Used by ``command_convol_original``; ``command_convol`` uses the numba twin
     ``_convol_rot_kernel``.
     """
     twobypi = 0.6366197723675814  # 2/π
@@ -211,7 +211,7 @@ def _convol_rot_python(x, y, d_angstrom, beta):
 
 
 # ---------------------------------------------------------------------------
-# HLYMANA helpers (numba) for command_hlymana_fast
+# HLYMANA helpers (numba) for command_hlymana
 # ---------------------------------------------------------------------------
 
 @njit(cache=True)
@@ -1332,7 +1332,7 @@ class wrplotter:
             Line centre [Å].
         d_angstrom : float
             Half-width Δλ_max [Å] (WRPLOT ``D``). Same meaning as ``value`` in
-            ``command_convol(..., shape="rot", value=D)``.
+            ``command_convol_original(..., shape="rot", value=D)``.
         beta : float
             Limb-darkening parameter β (WRPLOT ``BETA``). Default 0.
 
@@ -1352,12 +1352,12 @@ class wrplotter:
         out[m] = twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
         return out
             
-    def command_convol(self, dataset, shape="gaussian", value=0, beta=0):
+    def command_convol_original(self, dataset, shape="gaussian", value=0, beta=0):
         """    
         Convolution — pure-Python 1:1 port of WRPLOT CONVEX + CONVADD.
 
         Sample weights follow CONVADD: kernel(Δλ) × local spacing |Δx|.
-        Use ``command_convol_fast`` for the numba-accelerated twin.
+        Use ``command_convol`` for the numba-accelerated twin.
 
         Parameters
         ----------
@@ -1402,13 +1402,13 @@ class wrplotter:
             raise ValueError(f"Unknown convolution shape: {shape}")
         return np.array([x, y_new])
             
-    def command_convol_fast(self, dataset, shape="gaussian", value=0, beta=0,
+    def command_convol(self, dataset, shape="gaussian", value=0, beta=0,
                             precision=1e-4, allow_fft=False):
         """    
-        Fast convolution agreeing with ``command_convol`` to within ``precision``.
+        Fast convolution agreeing with ``command_convol_original`` to within ``precision``.
 
         By default this always uses the exact discrete, per-point sums of
-        ``command_convol`` (numba kernels with WRPLOT-style kernel×Δx
+        ``command_convol_original`` (numba kernels with WRPLOT-style kernel×Δx
         weights). For ``shape="rot"`` the kernel is the Unsoeld profile with
         fixed Δλ_max [Å] (same as WRPLOT). An optional FFT path exists for
         speed on uniform grids, but it is **opt-in** via ``allow_fft=True``.
@@ -1428,7 +1428,7 @@ class wrplotter:
         beta: float default: 0
             Limb-darkening coefficient β for rotational broadening.
         precision: float or None default: 1e-4
-            Maximum absolute flux difference allowed relative to ``command_convol``.
+            Maximum absolute flux difference allowed relative to ``command_convol_original``.
             Default ``1e-4`` is a typical “scientifically indistinguishable”
             tolerance. Pass ``None`` (or ``<= 0``) to request a fully exact
             discrete match (machine precision). Values tighter than ~1e-10 also
@@ -1916,7 +1916,7 @@ class wrplotter:
             h=((h2*a+h1)*a+h0)
             return h/wpi
         
-    def command_hlymana(self,dataset,key="coldens",value=-1,vrad=0,temp=-1,vturb=0,info=False):
+    def command_hlymana_original(self,dataset,key="coldens",value=-1,vrad=0,temp=-1,vturb=0,info=False):
         """
         Apply corrections for interstellar absorption by hydrogen Lyman lines (from Lyα to Ly20).
         By default, HLYMAN uses the formalism from Groenewegen & Lamers (1989) which accounts only 
@@ -2200,16 +2200,16 @@ class wrplotter:
 
         return dataset
 
-    def command_hlymana_fast(self,dataset,key="coldens",value=-1,vrad=0,temp=-1,vturb=0,info=False,cut_lyman=True,lyman_window=(900.0,1300.0)):
+    def command_hlymana(self,dataset,key="coldens",value=-1,vrad=0,temp=-1,vturb=0,info=False,cut_lyman=True,lyman_window=(900.0,1300.0)):
         """
-        Fast version of command_hlymana. Apply corrections for interstellar absorption
+        Fast version of command_hlymana_original. Apply corrections for interstellar absorption
         by hydrogen Lyman lines (from Lyα to Ly20).
         By default, HLYMAN uses the formalism from Groenewegen & Lamers (1989) which accounts only 
         for the damping (i.e. Lorentzian) profiles but no Doppler cores. However, if one of the 
         parameters T and/or VTURB is specified, HLYMAN applies Voigt profiles with the according 
         Doppler velocity.
         
-        Compared to command_hlymana this routine uses numba-accelerated optical-depth sums and
+        Compared to command_hlymana_original this routine uses numba-accelerated optical-depth sums and
         only evaluates newly inserted midpoints during the TAUCRIT refinement. By default only
         the Lyman window is processed and then stitched back onto the unmodified spectrum.
         
@@ -3313,7 +3313,7 @@ class wrplotter:
                 if center+offs < xmax:
                     text_boxes.append(self.__plot_idmult(text[i],wavelenghts[i],id_xoff=offs,id_y=id_ys[i],id_len=id_len,id_fontsize=id_fontsize,id_linesize=id_linesize,id_horizontal=id_horizontal,color=color,bbox_alpha=bbox_alpha))
     
-    def command_ismline(self, dataset, coldens, l0, fvalue, gamm,
+    def command_ismline_original(self, dataset, coldens, l0, fvalue, gamm,
                         atmass=None, vrad=0.0, temp=-273.15, vturb=0.0,
                         info=False):
         """
@@ -3488,28 +3488,28 @@ class wrplotter:
         return np.array([x, y])
 
 
-    def command_ismline_fast(self, dataset, coldens, l0, fvalue, gamm,
+    def command_ismline(self, dataset, coldens, l0, fvalue, gamm,
                              atmass=None, vrad=0.0, temp=-273.15, vturb=0.0,
                              cut_ism=True, window=30.0, ism_window=None,
                              info=False):
         """
-        Fast version of ``command_ismline`` with the same Fortran optics.
+        Fast version of ``command_ismline_original`` with the same Fortran optics.
 
         Speeds up by:
           1. batch-inserting the quadratic ISMLINE wavelength grid (one merge),
           2. numba-accelerated Voigt/Lorentz optical-depth application,
           3. optionally restricting work to a spectral window around the line
              (``cut_ism``), then stitching unmodified continuum back on
-             (same idea as ``command_hlymana_fast`` / ``cut_lyman``).
+             (same idea as ``command_hlymana`` / ``cut_lyman``).
 
         Parameters
         ----------
         dataset, coldens, l0, fvalue, gamm, atmass, vrad, temp, vturb, info
-            Same meaning and defaults as ``command_ismline``.
+            Same meaning and defaults as ``command_ismline_original``.
         cut_ism : bool, default True
             If True, apply the line only inside a wavelength window and leave
             points outside unchanged. Set False to process the full spectrum
-            (bit-identical intent to ``command_ismline``, still much faster).
+            (bit-identical intent to ``command_ismline_original``, still much faster).
         window : float, default 30.0
             Half-width [Angstrom] around the velocity-shifted line centre used
             when ``cut_ism`` is True and ``ism_window`` is None. The Fortran
@@ -3531,7 +3531,7 @@ class wrplotter:
         With ``cut_ism=True``, damping wings outside the window are neglected.
         Use ``cut_ism=False`` (or a very wide window) for a full-spectrum match.
         """
-        # --- constants (identical to ismline.f / command_ismline) ---
+        # --- constants (identical to ismline.f / command_ismline_original) ---
         CLIGHT = 299792.458
         XKBOLTZ = 1.38065000e-16
         CLCM = 2.99792458e10

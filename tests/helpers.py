@@ -349,7 +349,7 @@ def ism_kwargs_smc(**extra):
 
 def apply_ismlines_gal_smc(w, data, fast=False, **extra):
     """Apply GAL then SMC Si III λ1206 lines (test.plot ISMLINE case)."""
-    fn = w.command_ismline_fast if fast else w.command_ismline
+    fn = w.command_ismline if fast else w.command_ismline_original
     out = quiet(fn, data, **ism_kwargs_gal(**extra))
     out = quiet(fn, out, **ism_kwargs_smc(**extra))
     return out

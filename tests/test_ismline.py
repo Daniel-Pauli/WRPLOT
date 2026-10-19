@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Validation + speedup suite for command_ismline / command_ismline_fast.
+Validation + speedup suite for command_ismline_original / command_ismline.
 
 Uses GAL+SMC Si III λ1206 parameters and WRPLOT reference ref/ref_ismline.txt
 (produced by ``wrplot test.plot`` / ``./run_wrplot_refs.sh``).
@@ -37,7 +37,7 @@ class TestIsmlineAgreement(unittest.TestCase):
     def setUpClass(cls):
         cls.w = get_wrplotter()
         tiny = flat_continuum(1200.0, 1210.0, n=200)
-        quiet(cls.w.command_ismline_fast, tiny, **ism_kwargs_gal(cut_ism=True))
+        quiet(cls.w.command_ismline, tiny, **ism_kwargs_gal(cut_ism=True))
 
     def test_slow_fast_flat_continuum_voigt(self):
         """Several VTURB / COLDENS on a flat continuum around λ1206."""
@@ -54,9 +54,9 @@ class TestIsmlineAgreement(unittest.TestCase):
                     l0=1206.51, gamm=6.1e9, fvalue=1.67, atmass=28.0
                 )
                 base.update(kw)
-                slow = quiet(self.w.command_ismline, data, **base)
+                slow = quiet(self.w.command_ismline_original, data, **base)
                 fast = quiet(
-                    self.w.command_ismline_fast, data,
+                    self.w.command_ismline, data,
                     cut_ism=False, **base,
                 )
                 d = max_abs_diff(slow[1], fast[1], slow[0], fast[0])
@@ -69,8 +69,8 @@ class TestIsmlineAgreement(unittest.TestCase):
             coldens=-1e14, l0=1206.51, gamm=6.1e9, fvalue=1.67,
             vturb=0.0, temp=-273.15, vrad=0.0,
         )
-        slow = quiet(self.w.command_ismline, data, **kw)
-        fast = quiet(self.w.command_ismline_fast, data, cut_ism=False, **kw)
+        slow = quiet(self.w.command_ismline_original, data, **kw)
+        fast = quiet(self.w.command_ismline, data, cut_ism=False, **kw)
         self.assertLess(
             max_abs_diff(slow[1], fast[1], slow[0], fast[0]), ATOL_FLUX
         )
@@ -224,10 +224,10 @@ def make_plots():
             coldens=N, l0=1206.51, gamm=6.1e9, fvalue=1.67,
             atmass=28.0, vturb=15.0, vrad=0.0,
         )
-        quiet(w.command_ismline_fast, data0, cut_ism=False, **kw)
-        _, t_s = time_call(w.command_ismline, data0, n=3, **kw)
+        quiet(w.command_ismline, data0, cut_ism=False, **kw)
+        _, t_s = time_call(w.command_ismline_original, data0, n=3, **kw)
         _, t_f = time_call(
-            w.command_ismline_fast, data0, cut_ism=False, n=5, **kw
+            w.command_ismline, data0, cut_ism=False, n=5, **kw
         )
         timing_rows.append(dict(
             case=f"synthetic N={N:.0e}",
@@ -240,7 +240,7 @@ def make_plots():
         title=f"ISMLINE timing (windowed continuum N≈{len(model[0])} pts)",
         outfile="ismline_timing.txt",
         notes=[
-            "slow = command_ismline,  fast = command_ismline_fast",
+            "slow = command_ismline_original,  fast = command_ismline",
             "GAL+SMC = two Si III λ1206 components (test.plot / ref_ismline.txt)",
         ],
     )

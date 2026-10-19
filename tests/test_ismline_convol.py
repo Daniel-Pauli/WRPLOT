@@ -41,10 +41,10 @@ def run_pipeline(w, model, *, fast_ism=False, fast_convol=False, **ism_extra):
     out = quiet(w.command_sort, out)
     if fast_convol:
         out = quiet(
-            w.command_convol_fast, out, "gauss", GAUSS_FWHM, precision=None
+            w.command_convol, out, "gauss", GAUSS_FWHM, precision=None
         )
     else:
-        out = quiet(w.command_convol, out, "gauss", GAUSS_FWHM)
+        out = quiet(w.command_convol_original, out, "gauss", GAUSS_FWHM)
     return out
 
 
@@ -55,7 +55,7 @@ class TestIsmlineConvol(unittest.TestCase):
         cls.model = load_continuum_iue(cls.w)
         tiny = quiet(cls.w.command_cut, cls.model, (1200, 1215), axis="x")
         apply_ismlines_gal_smc(cls.w, tiny, fast=True, cut_ism=True, window=20.0)
-        cls.w.command_convol_fast(tiny, "gauss", GAUSS_FWHM)
+        cls.w.command_convol(tiny, "gauss", GAUSS_FWHM)
 
     def test_slow_vs_wrplot(self):
         if not WRPLOT_REF_ISMLINE_CONVOL.is_file():
@@ -93,7 +93,7 @@ def make_plots():
 
     tiny = quiet(w.command_cut, model, (1200, 1215), axis="x")
     apply_ismlines_gal_smc(w, tiny, fast=True, cut_ism=True, window=20.0)
-    w.command_convol_fast(tiny, "gauss", GAUSS_FWHM)
+    w.command_convol(tiny, "gauss", GAUSS_FWHM)
 
     configs = [
         ("slow+slow", dict(fast_ism=False, fast_convol=False)),
@@ -185,9 +185,9 @@ def make_plots():
         baseline_case="slow+slow",
         notes=[
             "Pipeline: ISMLINE GAL+SMC → SORT → CONVOL GAUSS=0.5",
-            "slow+slow = command_ismline + command_convol",
-            "fast+fast = command_ismline_fast (full) + command_convol_fast",
-            "fast_cut+fast = command_ismline_fast (cut window) + command_convol_fast",
+            "slow+slow = command_ismline_original + command_convol_original",
+            "fast+fast = command_ismline (full) + command_convol",
+            "fast_cut+fast = command_ismline (cut window) + command_convol",
         ],
     )
 
