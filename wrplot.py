@@ -82,31 +82,88 @@ def _convol_box_kernel(x, y, width):
 
 
 @njit(cache=True)
-def _convol_rot_kernel(x, y, vsini_kms, beta):
+def _convol_rot_kernel(x, y, d_angstrom, beta):
     """
-    Discrete rotational-broadening convolution on an irregular but sorted grid.
+    Discrete rotational convolution matching WRPLOT CONVEX+CONVADD (CHAR='R').
 
-    Kernel width scales with wavelength (Δλ = vsini/c * λ). Weights include
-    local spacing (WRPLOT CONVADD), matching command_convol.
+    ``d_angstrom`` is the fixed half-width Δλ_max [Å] (WRPLOT ``D``), not vsini.
+    Kernel (Unsoeld 1968, Eq. 123,11):
+        G = (2/π)√(1−xa²) + (β/2)(1−xa²),  xa = Δλ/D,  |xa| < 1
+    Each sample is weighted by G × local spacing.
     """
     n = len(x)
     out = np.empty(n)
-    vsini = vsini_kms / 299792.458
+    twobypi = 0.6366197723675814  # 2/π
     for i in range(n):
         mu = x[i]
-        half = vsini * mu
-        lo = np.searchsorted(x, mu - half, side="right")
-        hi = np.searchsorted(x, mu + half, side="left")
-        c1 = 2.0 * (1.0 - beta) / (np.pi * half * (1.0 - beta / 3.0))
-        c2 = beta / (2.0 * half * (1.0 - beta / 3.0))
+        lo = np.searchsorted(x, mu - d_angstrom, side="right")
+        hi = np.searchsorted(x, mu + d_angstrom, side="left")
         s = 0.0
         wsum = 0.0
         for j in range(lo, hi):
-            z2 = ((mu - x[j]) / half) ** 2
-            w = (c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)) * _local_spacing(x, j, n)
+            xa = (x[j] - mu) / d_angstrom
+            # |xa| < 1 enforced by search window; guard float edge
+            if xa <= -1.0 or xa >= 1.0:
+                continue
+            xa2 = xa * xa
+            g = twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
+            w = g * _local_spacing(x, j, n)
             s += y[j] * w
             wsum += w
         out[i] = s / wsum if wsum != 0.0 else 0.0
+    return out
+
+
+def _convol_rot_python(x, y, d_angstrom, beta):
+    """
+    Pure-Python rotational convolution (1:1 CONVEX loop for CHAR='R').
+
+    Used by ``command_convol``; ``command_convol_fast`` uses the numba twin
+    ``_convol_rot_kernel``.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = len(x)
+    out = np.zeros(n)
+    twobypi = 0.6366197723675814  # 2/π
+    d = float(d_angstrom)
+    beta = float(beta)
+
+    def spacing(k):
+        if n < 2:
+            return 1.0
+        if 0 < k < n - 1:
+            return abs((x[k + 1] - x[k - 1]) * 0.5)
+        if k == 0:
+            return abs(x[0] - x[1])
+        return abs(x[n - 2] - x[n - 1])
+
+    def add(L, K, acc, S):
+        xa = (x[K] - x[L]) / d if K != L else 0.0
+        if abs(xa) >= 1.0 and K != L:
+            return acc, S, False
+        xa2 = xa * xa
+        g = twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
+        g = g * spacing(K)
+        return acc + g * y[K], S + g, True
+
+    for L in range(n):
+        S = 0.0
+        acc = 0.0
+        acc, S, _ = add(L, L, acc, S)
+        K = L - 1
+        while K >= 0:
+            acc, S, ok = add(L, K, acc, S)
+            if not ok:
+                break
+            K -= 1
+        K = L + 1
+        while K < n:
+            acc, S, ok = add(L, K, acc, S)
+            if not ok:
+                break
+            K += 1
+        out[L] = acc / S if S != 0.0 else 0.0
     return out
 
 
@@ -1217,32 +1274,40 @@ class wrplotter:
         """
         return np.array([1 if  (a >= mu-width) & (a <= mu+width) else 0 for a in x])
     
-    def rot(self, x, mu=0, vsini=0, epsilon=0):
-        """    
-        Ellipsoidal function to mimic the rotational broadening effect for given range x.
-        Calculated using equation 18.14 from David F. Gray "The Observation And Analysis Of Stellar Photospheres".
-        
+    def rot(self, x, mu=0, d_angstrom=0, beta=0):
+        """
+        Rotational broadening kernel matching WRPLOT CONVADD (Unsoeld 1968).
+
+        G = (2/π)√(1−xa²) + (β/2)(1−xa²),  xa = (x−μ)/D,  |xa| < 1
+        (zero outside the disk).
+
         Parameters
         ----------
-        x: np.array or list or int
-            x-values over which the rotational broadening should be calculated.
-        mu: float default: 0
-            Central wavelenght. 
-        vsini: float default: 0
-            Projected rotational velocity of the object in km/s (this is different to WRPLOT!). 
-        epsilon: float default: 0
-            Limb darkening coefficient. By default this effect is ignored.
-            
+        x : array-like
+            Wavelengths [Å].
+        mu : float
+            Line centre [Å].
+        d_angstrom : float
+            Half-width Δλ_max [Å] (WRPLOT ``D``). Same meaning as ``value`` in
+            ``command_convol(..., shape="rot", value=D)``.
+        beta : float
+            Limb-darkening parameter β (WRPLOT ``BETA``). Default 0.
+
         Returns
         -------
-        The Rotation ellipse curve or the value of the curve at position x.
+        ndarray
+            Unnormalised kernel weights (zeros where |xa| ≥ 1).
         """
-        vsini = vsini / 299792.458
-        del_lambda = mu-x
-        del_lambda_L = vsini*mu
-        c1 = 2 * (1 - epsilon) / (np.pi * del_lambda_L * (1 - epsilon / 3.))
-        c2 = epsilon / (2.* del_lambda_L * (1. - epsilon/3.))
-        return c1 * (1-(del_lambda/del_lambda_L)**2)**0.5 + c2 * (1-(del_lambda/del_lambda_L)**2)
+        x = np.asarray(x, dtype=float)
+        if d_angstrom <= 0:
+            return np.zeros_like(x, dtype=float)
+        xa = (x - mu) / d_angstrom
+        out = np.zeros_like(x, dtype=float)
+        m = np.abs(xa) < 1.0
+        xa2 = xa[m] ** 2
+        twobypi = 0.6366197723675814
+        out[m] = twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
+        return out
             
     def command_convol(self, dataset, shape="gaussian", value=0, beta=0):
         """    
@@ -1261,13 +1326,15 @@ class wrplotter:
         shape: str default: gaussian
             Possible options: "gauss" or gaussian", "box" or "kasten", "rot" or "rotation"
         value: float default: 0
-            A value of with of an corresponding curve:
-            If shape == "gauss", the value corresponds to the FWHM.
-            If shape == "box", the value corresponds to the half width of the box.
-            If shape == "rot", the value corresponds to the vsini of the rotation (note this is somewhat different to WRPLOT!)
+            Kernel width parameter:
+            If shape == "gauss", FWHM [Å].
+            If shape == "box", half-width of the box [Å].
+            If shape == "rot", Δλ_max [Å] (WRPLOT ``D``) — fixed wavelength
+            half-width of the Unsoeld rotation profile (not vsini in km/s).
+            Convert via Δλ = λ · v_sin_i / c if needed.
         beta: float default: 0
-            This value is only needed for the rotational broadening and is the Limb darkening coefficient.
-            By default limb-darkening is ignored.
+            Limb-darkening coefficient β for rotational broadening
+            (WRPLOT ``BETA``). Ignored for gauss/box.
             
         Returns
         -------
@@ -1290,7 +1357,8 @@ class wrplotter:
         elif shape in ("box", "kasten"):
             y_new = _convol_box_kernel(x, y, value)
         elif shape in ("rot", "rotation"):
-            y_new = _convol_rot_kernel(x, y, value, beta)
+            # Pure-Python WRPLOT loop (slow path); fast uses numba twin
+            y_new = _convol_rot_python(x, y, value, beta)
         else:
             raise ValueError(f"Unknown convolution shape: {shape}")
         return np.array([x, y_new])
@@ -1302,11 +1370,9 @@ class wrplotter:
 
         By default this always uses the exact discrete, per-point sums of
         ``command_convol`` (numba kernels with WRPLOT-style kernel×Δx
-        weights). An optional FFT path exists for speed on uniform grids,
-        but it is **opt-in** via ``allow_fft=True`` because FFT assumes
-        uniform Δλ and a single fixed kernel — conditions that real spectra
-        and rotational broadening often violate. On a uniform grid the FFT
-        path is consistent with Δx weighting (constant Δx cancels).
+        weights). For ``shape="rot"`` the kernel is the Unsoeld profile with
+        fixed Δλ_max [Å] (same as WRPLOT). An optional FFT path exists for
+        speed on uniform grids, but it is **opt-in** via ``allow_fft=True``.
 
         Parameters
         ----------
@@ -1316,13 +1382,12 @@ class wrplotter:
         shape: str default: gaussian
             Possible options: "gauss" or gaussian", "box" or "kasten", "rot" or "rotation"
         value: float default: 0
-            A value of with of an corresponding curve:
-            If shape == "gauss", the value corresponds to the FWHM.
-            If shape == "box", the value corresponds to the half width of the box.
-            If shape == "rot", the value corresponds to the vsini of the rotation (note this is somewhat different to WRPLOT!)
+            Kernel width parameter:
+            If shape == "gauss", FWHM [Å].
+            If shape == "box", half-width of the box [Å].
+            If shape == "rot", Δλ_max [Å] (WRPLOT ``D``), not vsini in km/s.
         beta: float default: 0
-            This value is only needed for the rotational broadening and is the Limb darkening coefficient.
-            By default limb-darkening is ignored.
+            Limb-darkening coefficient β for rotational broadening.
         precision: float or None default: 1e-4
             Maximum absolute flux difference allowed relative to ``command_convol``.
             Default ``1e-4`` is a typical “scientifically indistinguishable”
@@ -1333,11 +1398,9 @@ class wrplotter:
             If False (default), always use the exact kernel path.
             If True, FFT may be used **only when all** of the following hold:
               - ``precision`` is set and ``>= 1e-10`` (not forcing exact),
-              - ``shape`` is Gaussian or box (not rotation; rot width ∝ λ),
+              - ``shape`` is Gaussian or box (not rotation; fixed-Δλ rot is
+                FFT-safe on a uniform grid but still excluded here),
               - the wavelength grid is mathematically uniform.
-            FFT is faster but can disagree with ``command_convol`` on irregular
-            sampling; leave this False unless you know the grid is uniform and
-            accept the ``precision`` tolerance.
             
         Returns
         -------
@@ -1981,90 +2044,121 @@ class wrplotter:
             dataset = self.command_insert(dataset, XLYEDGE-0.001)
             dataset = self.command_insert(dataset, XLYEDGE+0.001)
             
-        ###### multiplication with absorption profile        
-        # initialize tau criterion
-        TAUOLD = 1e-40
-        
-        tau = []
+        ###### multiplication with absorption profile (hlymana.f ~6564-6666)
+        # Working copies X1,Y1: INSERTPOINT may grow the grid under our feet
+        x1 = np.asarray(dataset[0], dtype=np.float64).copy()
+        y1 = np.asarray(dataset[1], dtype=np.float64).copy()
+        idat = len(x1)
+
+        SIGMACL = 0.026537
+        use_voigt = (TEMP > 0.0) or (VTURB > 0.0)
+
+        # Lyman-edge factor: tau of highest Lyman line at line centre
+        # (Fortran: C0(NHI) for Lorentz; FAK*VOIGTH(A,0)*ENH for Voigt)
+        if use_voigt:
+            VDOPP = np.sqrt(
+                2.0 * XKBOLTZ * TEMP / (XMP * ATMASSH) + VTURB * VTURB
+            )
+            DNDOPP_NHI = VDOPP / (XLAM[-1] * 1e-8)
+            A_NHI = GAMM[-1] / (4.0 * np.pi * DNDOPP_NHI)
+            FAK_NHI = SIGMACL * FVALUE[-1] / DNDOPP_NHI
+            TAULYMEDGE = FAK_NHI * self.voigth(a=A_NHI, v=0.0) * ENH
+        else:
+            TAULYMEDGE = ENH * C0[-1]
+
+        TAUOLD = 0.0
         xdata = []
         ydata = []
-        
         I = 0
-        while I < len(dataset[0]):
+        while I < idat:
             TAU = 0.0
-            
-            if(TEMP > 0. or VTURB > 0.):
-                # Temperature given --> voigt profile
+            if use_voigt:
                 for LY in range(len(XLAM)):
-                    VDOPP = np.sqrt(2.*XKBOLTZ*TEMP/(XMP*ATMASSH)+VTURB*VTURB)
-                    DNDOPP = VDOPP /(XLAM[LY]*1e-8)
-                    # Constant A for normalized voight function
-                    A = GAMM[LY] / (4.0*np.pi*DNDOPP)
-                    # variable V for normalized voigt
-                    DLAM = dataset[0][I] - XLAM[LY]
-                    DNUE = CLIGHT*1e13*DLAM/(XLAM[LY]*XLAM[LY])
+                    VDOPP = np.sqrt(
+                        2.0 * XKBOLTZ * TEMP / (XMP * ATMASSH) + VTURB * VTURB
+                    )
+                    DNDOPP = VDOPP / (XLAM[LY] * 1e-8)
+                    A = GAMM[LY] / (4.0 * np.pi * DNDOPP)
+                    DLAM = x1[I] - XLAM[LY]
+                    DNUE = CLIGHT * 1e13 * DLAM / (XLAM[LY] * XLAM[LY])
                     V = DNUE / DNDOPP
-                    HH = self.voigth(a=A,v=V)
-                    # cross section = (pi e^2)/mc * f * voigth / DNDOPP
-                    SIGMACL = 0.026537
+                    HH = self.voigth(a=A, v=V)
                     FAK = SIGMACL * FVALUE[LY] / DNDOPP
                     TAU = TAU + FAK * HH * ENH
-                
-                V = 0.0
-                TAULYMEDGE = FAK * self.voigth(a=A,v=V) * ENH
             else:
-                # no or neg. Temperature given --> Lorentz profile
                 for LY in range(len(XLAM)):
-                    DLAM = dataset[0][I]-XLAM[LY]
-                    TAU = TAU + ENH * C0[LY] / (1.0+C1[LY]*DLAM*DLAM)
-                TAULYMEDGE = ENH * C0[LY]
-            
-            if TAUOLD == 0:
-                print("Tau = 0")
-                
-            if I > 0 and TAUCRIT > 0 and abs((TAU - TAUOLD)/TAUOLD) > TAUCRIT and   abs(dataset[0][I]-dataset[0][I-1])>0.001:
-                XINS = (dataset[0][I]+dataset[0][I-1])/2.
-                dataset = self.command_insert(dataset,XINS)
-                XINS = (dataset[0][I]+dataset[0][I+1])/2.
-                dataset = self.command_insert(dataset,XINS)
-                I = I-1
+                    DLAM = x1[I] - XLAM[LY]
+                    TAU = TAU + ENH * C0[LY] / (1.0 + C1[LY] * DLAM * DLAM)
+
+            # Fortran: insert ONE midpoint between I-1 and I, then GOTO 16
+            # (re-evaluate at the same index, now holding the new point)
+            if (
+                TAUCRIT > 0
+                and I > 0
+                and TAUOLD != 0.0
+                and abs((TAU - TAUOLD) / TAUOLD) > TAUCRIT
+                and abs(x1[I] - x1[I - 1]) > 0.001
+            ):
+                XINS = 0.5 * (x1[I] + x1[I - 1])
+                # Linear interp flux at insert (INSERTPOINT)
+                YINS = y1[I - 1] + (y1[I] - y1[I - 1]) * (
+                    (XINS - x1[I - 1]) / (x1[I] - x1[I - 1])
+                )
+                x1 = np.insert(x1, I, XINS)
+                y1 = np.insert(y1, I, YINS)
+                idat = len(x1)
                 continue
-                
+
             TAUOLD = TAU
-            tau.append(TAU)
-            xdata.append(dataset[0][I])
-            ydata.append(dataset[1][I])
-            I = I +1
-            
-        for i,tt in enumerate(tau):
-            if (tt < 10.):
-                # Prevent floating overflow for positive tau (dereddening)
-                ydata[i] = ydata[i]*np.exp(tt)
+            if TAU < 10.0:
+                ydata.append(y1[I] * np.exp(TAU))
             else:
-                ydata[i] = 0.0
-                print("Warning: In Lyman alpha correction tau is ", TAU, ">10. Hence, the flux is set to 0.0")
-            
-        dataset = np.array([xdata,ydata])
-                
+                ydata.append(0.0)
+                print(
+                    "Warning: In Lyman alpha correction tau is ",
+                    TAU,
+                    ">10. Hence, the flux is set to 0.0",
+                )
+            xdata.append(x1[I])
+            I = I + 1
+
+        dataset = np.array([np.asarray(xdata), np.asarray(ydata)])
+
         if TAUCRIT > 0 and MAXNPOINTS != 0:
-            print("HLYMANA: Dataset expanded to ",len(dataset[0]), " datapoints because of TAUCRIT and MAXNPOINTS.")
+            print(
+                "HLYMANA: Dataset expanded to ",
+                len(dataset[0]),
+                " datapoints because of TAUCRIT and MAXNPOINTS.",
+            )
         elif MAXNPOINTS == 0 and TAUCRIT > 0:
-            print("HLYMANA: Dataset expanded to ",len(dataset[0]), " datapoints because of TAUCRIT.")
+            print(
+                "HLYMANA: Dataset expanded to ",
+                len(dataset[0]),
+                " datapoints because of TAUCRIT.",
+            )
         elif MAXNPOINTS != 0 and TAUCRIT < 0:
-            print("HLYMANA: Dataset expanded to ",len(dataset[0]), " datapoints because of MAXNPOINTS.")
+            print(
+                "HLYMANA: Dataset expanded to ",
+                len(dataset[0]),
+                " datapoints because of MAXNPOINTS.",
+            )
         else:
-            print("HLYMANA: Dataset expanded to ",len(dataset[0]), " Datapoints only for HLYMAN line center.")
-            
-        TAULYMEDGE = ENH * C0[0]
-        EXPTAULYMEDGE = 0.0
-        
-        if TAULYMEDGE < 10.:
+            print(
+                "HLYMANA: Dataset expanded to ",
+                len(dataset[0]),
+                " Datapoints only for HLYMAN line center.",
+            )
+
+        # Set tau = tau(NHI) bluewards of LY(NHI) up to Lyman edge
+        if TAULYMEDGE < 10.0:
             EXPTAULYMEDGE = np.exp(TAULYMEDGE)
-            
+        else:
+            EXPTAULYMEDGE = 0.0
+
         for I in range(len(dataset[0])):
             if dataset[0][I] < XLAM[-1] and dataset[0][I] > XLYEDGE:
-                dataset[1][I] = dataset[1][I]*EXPTAULYMEDGE
-            
+                dataset[1][I] = dataset[1][I] * EXPTAULYMEDGE
+
         return dataset
 
     def command_hlymana_fast(self,dataset,key="coldens",value=-1,vrad=0,temp=-1,vturb=0,info=False,cut_lyman=True,lyman_window=(900.0,1300.0)):
@@ -2243,22 +2337,35 @@ class wrplotter:
         
         XLAMMIN = lam[0]
         XLAMMAX = lam[-1]
-        
-        # insert line centers and two points around the Lyman edge
-        centers = XLAM[(XLAM >= XLAMMIN) & (XLAM <= XLAMMAX)]
+
+        # Insert line centres + midpoints between centres (MAXNPOINTS==0 path
+        # in hlymana.f) and two points around the Lyman edge
         extra = []
-        if centers.size:
-            extra.append(centers)
-        if ((XLYEDGE - XLAMMIN)*(XLYEDGE - XLAMMAX) < 0):
-            extra.append(np.array([XLYEDGE-0.001, XLYEDGE+0.001]))
+        xinsold = lam[0]
+        for i in range(len(XLAM) - 1, -1, -1):
+            xins = XLAM[i]
+            if XLAMMIN <= xins <= XLAMMAX:
+                extra.append(xins)
+                xmid = 0.5 * (xinsold + xins)
+                if XLAMMIN <= xmid <= XLAMMAX:
+                    extra.append(xmid)
+                xinsold = xins
+        if ((XLYEDGE - XLAMMIN) * (XLYEDGE - XLAMMAX) < 0):
+            extra.extend([XLYEDGE - 0.001, XLYEDGE + 0.001])
         if extra:
-            extra = np.concatenate(extra)
-            flux = np.concatenate([flux, np.interp(extra, lam, flux)])
-            lam = np.concatenate([lam, extra])
-            order = np.argsort(lam)
-            lam = lam[order]
-            flux = flux[order]
-        
+            extra = np.asarray(extra, dtype=np.float64)
+            # drop points already on the grid
+            idx = np.searchsorted(lam, extra)
+            idx = np.clip(idx, 0, lam.size - 1)
+            already = (lam[idx] == extra) | ((idx > 0) & (lam[idx - 1] == extra))
+            extra = extra[~already]
+            if extra.size:
+                flux = np.concatenate([flux, np.interp(extra, lam, flux)])
+                lam = np.concatenate([lam, extra])
+                order = np.argsort(lam, kind="mergesort")
+                lam = lam[order]
+                flux = flux[order]
+
         # Temperature / turbulence given --> Voigt, else Lorentz
         use_voigt = (TEMP > 0.) or (VTURB > 0.)
         if use_voigt:
@@ -2268,30 +2375,34 @@ class wrplotter:
             A_arr = GAMM / (4.0*np.pi*DNDOPP)
             FAK_arr = SIGMACL * FVALUE / DNDOPP
             tau0 = _hlymana_tau_voigt(lam, XLAM, A_arr, FAK_arr, DNDOPP, ENH, CLIGHT)
+            # Lyman-edge factor: highest-line Voigt at line centre (Fortran)
+            TAULYMEDGE = FAK_arr[-1] * _voigth_njit(A_arr[-1], 0.0) * ENH
         else:
             A_arr = np.empty(0)
             FAK_arr = np.empty(0)
             DNDOPP = np.empty(0)
             tau0 = _hlymana_tau_lorentz(lam, XLAM, C0, C1, ENH)
-        
+            # Lyman-edge factor: C0(NHI) (Fortran), NOT C0(1)/Lyα
+            TAULYMEDGE = ENH * C0[-1]
+
         lam_curr, flux_curr, tau_final, iter_count = _hlymana_adaptive_refine(
             lam, flux, tau0, XLAM, C0, C1, A_arr, FAK_arr, DNDOPP,
             ENH, CLIGHT, use_voigt, TAUCRIT, MAX_ITER,
         )
-        
+
         if info and iter_count >= MAX_ITER:
             print("HLYMANA: reached max refinement iterations.")
-        
+
         # Prevent floating overflow for positive tau (dereddening)
         flux_out = np.where(tau_final < 10., flux_curr*np.exp(tau_final), 0.0)
         if info and np.any(tau_final >= 10.):
             print("Warning: In Lyman alpha correction tau >= 10. Flux set to 0.0 at some points.")
-        
-        TAULYMEDGE = ENH * C0[0]
-        EXPTAULYMEDGE = 0.0
+
         if TAULYMEDGE < 10.:
             EXPTAULYMEDGE = np.exp(TAULYMEDGE)
-        
+        else:
+            EXPTAULYMEDGE = 0.0
+
         mask = (lam_curr < XLAM[-1]) & (lam_curr > XLYEDGE)
         flux_out[mask] = flux_out[mask]*EXPTAULYMEDGE
         

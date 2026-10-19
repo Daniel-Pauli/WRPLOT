@@ -34,8 +34,8 @@ model1 = wrplot.command_cut(model1,(3000,7000),axis="x")
 
 # can convolve it with a gaussian
 model1 = wrplot.command_convol(model1,"gauss",0.5)
-# or with rotation
-model1 = wrplot.command_convol(model1,"rot",300)
+# or with rotation (value = Δλ_max in Å, WRPLOT convention; e.g. ~5 Å ≈ 300 km/s at 5000 Å)
+model1 = wrplot.command_convol(model1, "rot", 5.0, beta=0.0)
 
 
 # In[3]:
