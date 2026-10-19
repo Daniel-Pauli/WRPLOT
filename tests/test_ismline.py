@@ -2,7 +2,7 @@
 """
 Validation + speedup suite for command_ismline / command_ismline_fast.
 
-Uses OG2.plot parameters and WRPLOT reference ref/ref_ismline.txt
+Uses GAL+SMC Si III λ1206 parameters and WRPLOT reference ref/ref_ismline.txt
 (produced by ``wrplot test.plot`` / ``./run_wrplot_refs.sh``).
 Also sweeps several column densities / turbulent velocities on synthetic data.
 """
@@ -17,16 +17,16 @@ import numpy as np
 from helpers import (
     ATOL_FLUX,
     WRPLOT_REF_ISMLINE,
-    apply_og_ismlines,
+    apply_ismlines_gal_smc,
     compare_in_window,
     flat_continuum,
     get_wrplotter,
     load_continuum_iue,
     load_ref,
     max_abs_diff,
-    og_ism_kwargs_gal,
+    ism_kwargs_gal,
     quiet,
-    save_speedup_bar,
+    save_timing_table,
     savefig,
     time_call,
 )
@@ -37,7 +37,7 @@ class TestIsmlineAgreement(unittest.TestCase):
     def setUpClass(cls):
         cls.w = get_wrplotter()
         tiny = flat_continuum(1200.0, 1210.0, n=200)
-        quiet(cls.w.command_ismline_fast, tiny, **og_ism_kwargs_gal(cut_ism=True))
+        quiet(cls.w.command_ismline_fast, tiny, **ism_kwargs_gal(cut_ism=True))
 
     def test_slow_fast_flat_continuum_voigt(self):
         """Several VTURB / COLDENS on a flat continuum around λ1206."""
@@ -81,7 +81,7 @@ class TestIsmlineAgreement(unittest.TestCase):
             self.skipTest("ref/ref_ismline.txt missing — run ./run_wrplot_refs.sh")
         ref = load_ref(WRPLOT_REF_ISMLINE)
         model = load_continuum_iue(self.w)
-        slow = apply_og_ismlines(self.w, model, fast=False)
+        slow = apply_ismlines_gal_smc(self.w, model, fast=False)
         st = compare_in_window(slow, ref[:, 0], ref[:, 1], 1170.0, 1250.0)
         self.assertLess(
             st["max"], ATOL_FLUX,
@@ -95,16 +95,16 @@ class TestIsmlineSpeed(unittest.TestCase):
 
         w = get_wrplotter()
         model = quiet(w.command_cut, load_continuum_iue(w), (1150.0, 1280.0), axis="x")
-        apply_og_ismlines(w, model, fast=True, cut_ism=True, window=30.0)
+        apply_ismlines_gal_smc(w, model, fast=True, cut_ism=True, window=30.0)
 
         t0 = time.perf_counter()
-        apply_og_ismlines(w, model, fast=False)
+        apply_ismlines_gal_smc(w, model, fast=False)
         t_slow = time.perf_counter() - t0
 
         times = []
         for _ in range(3):
             t0 = time.perf_counter()
-            apply_og_ismlines(w, model, fast=True, cut_ism=False)
+            apply_ismlines_gal_smc(w, model, fast=True, cut_ism=False)
             times.append(time.perf_counter() - t0)
         t_fast = float(np.median(times))
 
@@ -119,11 +119,11 @@ def make_plots():
     w = get_wrplotter()
     model = quiet(w.command_cut, load_continuum_iue(w), (1100.0, 1350.0), axis="x")
     print(f"Windowed input: {len(model[0])} pts")
-    apply_og_ismlines(w, model, fast=True, cut_ism=True, window=30.0)
+    apply_ismlines_gal_smc(w, model, fast=True, cut_ism=True, window=30.0)
 
     def timed(fast, **extra):
         t0 = time.perf_counter()
-        out = apply_og_ismlines(w, model, fast=fast, **extra)
+        out = apply_ismlines_gal_smc(w, model, fast=fast, **extra)
         return out, time.perf_counter() - t0
 
     print("Running slow…")
@@ -179,7 +179,7 @@ def make_plots():
     ax.set_xlim(1170, 1250)
     ax.set_ylim(0, 1.6)
     ax.set_ylabel("Normalised flux")
-    ax.set_title("ISMLINE Si III λ1206 (GAL + SMC) — QC vs WRPLOT test.plot")
+    ax.set_title("ISMLINE Si III λ1206 (GAL + SMC) vs WRPLOT test.plot")
     ax.legend(loc="upper right", fontsize=8)
 
     ax = axes[1]
@@ -201,43 +201,48 @@ def make_plots():
     fig.tight_layout()
     savefig(fig, "ismline_comparison.png")
 
-    save_speedup_bar(
-        ["full spectrum", "cut window=30 Å"],
-        [t_slow, t_slow],
-        [t_full, t_cut],
-        title=f"ISMLINE speedup (N≈{len(model[0])} pts windowed, GAL+SMC)",
-        outfile="ismline_speedup.png",
-        ylabel="Time [s]",
+    d_wr = (
+        compare_in_window(slow, ref[:, 0], ref[:, 1], 1170, 1250)["max"]
+        if ref is not None else None
     )
+    timing_rows = [
+        dict(
+            case="GAL+SMC full spectrum",
+            t_slow=t_slow, t_fast=t_full, max_d_wrplot=d_wr,
+        ),
+        dict(
+            case="GAL+SMC cut window=30 Å",
+            t_slow=t_slow, t_fast=t_cut, max_d_wrplot=d_wr,
+        ),
+    ]
 
     # Parameter sweep: coldens on synthetic continuum
     print("\nColdens sweep (synthetic)…")
     data0 = flat_continuum(1195.0, 1220.0, n=8000)
-    labels, ts, tf = [], [], []
     for N in (-1e13, -5e13, -1e14, -5e14):
         kw = dict(
             coldens=N, l0=1206.51, gamm=6.1e9, fvalue=1.67,
             atmass=28.0, vturb=15.0, vrad=0.0,
         )
-        quiet(w.command_ismline_fast, data0, cut_ism=False, **kw)  # warmup once
+        quiet(w.command_ismline_fast, data0, cut_ism=False, **kw)
         _, t_s = time_call(w.command_ismline, data0, n=3, **kw)
         _, t_f = time_call(
             w.command_ismline_fast, data0, cut_ism=False, n=5, **kw
         )
-        labels.append(f"N={N:.0e}")
-        ts.append(t_s * 1000)
-        tf.append(t_f * 1000)
-        d = max_abs_diff(
-            quiet(w.command_ismline, data0, **kw)[1],
-            quiet(w.command_ismline_fast, data0, cut_ism=False, **kw)[1],
-        )
-        print(f"  N={N:.1e}: {t_s*1e3:.1f}ms → {t_f*1e3:.2f}ms  "
-              f"({t_s/t_f:.0f}×)  max|Δ|={d:.2e}")
-    save_speedup_bar(
-        labels, ts, tf,
-        title="ISMLINE speedup vs column density (synthetic, 8k pts)",
-        outfile="ismline_speedup_coldens.png",
-        ylabel="Time [ms]",
+        timing_rows.append(dict(
+            case=f"synthetic N={N:.0e}",
+            t_slow=t_s, t_fast=t_f, max_d_wrplot=None,
+        ))
+        print(f"  N={N:.1e}: {t_s*1e3:.1f}ms → {t_f*1e3:.2f}ms  ({t_s/t_f:.0f}×)")
+
+    save_timing_table(
+        timing_rows,
+        title=f"ISMLINE timing (windowed continuum N≈{len(model[0])} pts)",
+        outfile="ismline_timing.txt",
+        notes=[
+            "slow = command_ismline,  fast = command_ismline_fast",
+            "GAL+SMC = two Si III λ1206 components (test.plot / ref_ismline.txt)",
+        ],
     )
 
 

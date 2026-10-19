@@ -1,0 +1,14 @@
+ISMLINE timing (windowed continuum N≈19777 pts)
+===============================================
+
+slow = command_ismline,  fast = command_ismline_fast
+GAL+SMC = two Si III λ1206 components (test.plot / ref_ismline.txt)
+
+case                             slow          fast     speedup    max|d| vs WRPLOT
+-----------------------  ------------  ------------  ----------  ------------------
+GAL+SMC full spectrum        10.509 s      898.8 us    11692.8x            1.37e-05
+GAL+SMC cut window=30 Å      10.509 s      485.6 us    21641.8x            1.37e-05
+synthetic N=-1e+13            1.496 s      201.8 us     7412.3x                   —
+synthetic N=-5e+13            1.501 s      224.4 us     6689.5x                   —
+synthetic N=-1e+14            1.511 s      223.2 us     6770.0x                   —
+synthetic N=-5e+14            1.504 s      243.4 us     6179.9x                   —

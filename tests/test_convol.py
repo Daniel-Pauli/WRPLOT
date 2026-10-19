@@ -24,7 +24,7 @@ from helpers import (
     load_ref,
     max_abs_diff,
     quiet,
-    save_speedup_bar,
+    save_timing_table,
     savefig,
     synthetic_absorption,
     time_call,
@@ -94,7 +94,7 @@ class TestConvolAgreement(unittest.TestCase):
             np.testing.assert_array_equal(out[1], data[1])
 
     def test_vs_wrplot_gauss_box_rot(self):
-        """Compare to WRPLOT refs on data/continuum_flat.dat (test.plot plots 7–9)."""
+        """Compare to WRPLOT refs on data/continuum_flat.dat (test.plot CONVOL plots)."""
         cases = [
             ("gauss", 2.0, 0.0, WRPLOT_REF_CONVOL_GAUSS),
             ("box", 2.0, 0.0, WRPLOT_REF_CONVOL_BOX),
@@ -144,7 +144,7 @@ def make_plots():
     quiet(w.command_convol_fast, data, "box", 1.0)
     quiet(w.command_convol_fast, data, "rot", 2.5, beta=0.0)
 
-    # Cases that match tests/test.plot plots 7–9 (have WRPLOT refs)
+    # Cases that match tests/test.plot CONVOL plots (have WRPLOT refs)
     wrplot_cases = [
         ("gauss", 2.0, 0.0, "GAUSS FWHM=2.0", WRPLOT_REF_CONVOL_GAUSS),
         ("box", 2.0, 0.0, "BOX / KASTEN=2.0", WRPLOT_REF_CONVOL_BOX),
@@ -235,8 +235,15 @@ def make_plots():
     fig.tight_layout()
     savefig(fig, "convol_comparison.png")
 
-    # Timing bar (include extras)
-    timing = list(results)
+    timing_rows = [
+        dict(
+            case=r["label"],
+            t_slow=r["t_slow"],
+            t_fast=r["t_fast"],
+            max_d_wrplot=r["d_wr"],
+        )
+        for r in results
+    ]
     for shape, value, beta, label in timing_extra:
         _, t_slow = time_call(
             w.command_convol, data, shape, value, beta=beta, n=3
@@ -245,15 +252,18 @@ def make_plots():
             w.command_convol_fast, data, shape, value, beta=beta,
             precision=None, n=3,
         )
-        timing.append(dict(label=label, t_slow=t_slow, t_fast=t_fast))
+        timing_rows.append(dict(
+            case=label, t_slow=t_slow, t_fast=t_fast, max_d_wrplot=None,
+        ))
 
-    save_speedup_bar(
-        [r["label"] for r in timing],
-        [r["t_slow"] * 1000 for r in timing],
-        [r["t_fast"] * 1000 for r in timing],
-        title=f"CONVOL speedup (N={len(data[0])} pts)",
-        outfile="convol_speedup.png",
-        ylabel="Time [ms]",
+    save_timing_table(
+        timing_rows,
+        title=f"CONVOL timing (N={len(data[0])} pts, continuum_flat.dat)",
+        outfile="convol_timing.txt",
+        notes=[
+            "slow = command_convol,  fast = command_convol_fast",
+            "Gauss/box slow and fast share the same numba kernel (~1x).",
+        ],
     )
     return results
 

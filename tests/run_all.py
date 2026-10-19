@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Run all wrplot validation suites and generate speedup / comparison plots.
+Run all wrplot validation suites and generate QC spectra + timing tables.
 
 Usage (from repo root or tests/):
     python tests/run_all.py
@@ -29,15 +29,15 @@ import test_arith  # noqa: E402
 import test_convol  # noqa: E402
 import test_hlymana  # noqa: E402
 import test_ismline  # noqa: E402
-import test_og_pipeline  # noqa: E402
+import test_ismline_convol  # noqa: E402
 import test_voigt  # noqa: E402
 
 
 PLOT_MODULES = [
     ("CONVOL", test_convol.make_plots),
     ("ISMLINE", test_ismline.make_plots),
+    ("ISMLINE+CONVOL", test_ismline_convol.make_plots),
     ("HLYMANA", test_hlymana.make_plots),
-    ("OG pipeline", test_og_pipeline.make_plots),
 ]
 
 UNIT_MODULES = [
@@ -45,8 +45,8 @@ UNIT_MODULES = [
     test_arith,
     test_convol,
     test_ismline,
+    test_ismline_convol,
     test_hlymana,
-    test_og_pipeline,
 ]
 
 
@@ -64,7 +64,7 @@ def run_unit_tests() -> int:
 
 def run_plots() -> None:
     print("=" * 60, flush=True)
-    print("Generating comparison + speedup plots → tests/output/", flush=True)
+    print("Generating QC plots + timing tables → tests/output/", flush=True)
     print("=" * 60, flush=True)
     for name, fn in PLOT_MODULES:
         print(f"\n--- {name} ---", flush=True)
@@ -86,7 +86,7 @@ def main():
         rc = run_unit_tests()
     if not args.unit_only:
         run_plots()
-        print(f"\nPlots written to {TESTS / 'output'}")
+        print(f"\nOutputs written to {TESTS / 'output'}")
     if rc:
         print("\nSome unit tests FAILED.", file=sys.stderr)
     else:

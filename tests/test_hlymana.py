@@ -25,7 +25,7 @@ from helpers import (
     load_uv,
     max_abs_diff,
     quiet,
-    save_speedup_bar,
+    save_timing_table,
     savefig,
     time_call,
 )
@@ -270,15 +270,28 @@ def make_plots():
     fig.tight_layout()
     savefig(fig, "hlymana_uv_comparison.png")
 
-    save_speedup_bar(
-        [f"N={r['N']:.0e}\ncut" for r in results]
-        + [f"N={r['N']:.0e}\nfull" for r in results]
-        + ["UV -1e20\ncut"],
-        [r["t_slow"] for r in results] * 2 + [t_uv],
-        [r["t_cut"] for r in results] + [r["t_full"] for r in results] + [t_uvf],
-        title="HLYMANA speedup",
-        outfile="hlymana_speedup.png",
-        ylabel="Time [s]",
+    timing_rows = []
+    for r in results:
+        timing_rows.append(dict(
+            case=f"flat N={r['N']:.0e} (cut)",
+            t_slow=r["t_slow"], t_fast=r["t_cut"], max_d_wrplot=r["d_wr"],
+        ))
+        timing_rows.append(dict(
+            case=f"flat N={r['N']:.0e} (full)",
+            t_slow=r["t_slow"], t_fast=r["t_full"], max_d_wrplot=r["d_wr"],
+        ))
+    timing_rows.append(dict(
+        case="UV N=-1e20 (cut)",
+        t_slow=t_uv, t_fast=t_uvf, max_d_wrplot=d_uv,
+    ))
+    save_timing_table(
+        timing_rows,
+        title="HLYMANA timing",
+        outfile="hlymana_timing.txt",
+        notes=[
+            "slow = command_hlymana,  fast = command_hlymana_fast",
+            "cut = cut_lyman window; full = entire spectrum",
+        ],
     )
 
 

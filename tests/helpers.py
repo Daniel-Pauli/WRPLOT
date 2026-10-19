@@ -1,5 +1,5 @@
 """
-Shared helpers for wrplot validation / speedup test suites.
+Shared helpers for wrplot validation test suites.
 
 All input continua and WRPLOT reference tables live under tests/:
   data/   — continua used by both WRPLOT (test.plot) and Python
@@ -51,7 +51,7 @@ CONTINUUM_LYMAN_FLAT = DATA / "continuum_lyman_flat.dat"  # flat 900–1300 Å
 UV_SPECTRUM = DATA / "uv_spectrum.dat"          # UV continuum 900–1400 Å
 
 WRPLOT_REF_ISMLINE = REF / "ref_ismline.txt"
-WRPLOT_REF_CONVOL = REF / "ref_ismline_convol.txt"
+WRPLOT_REF_ISMLINE_CONVOL = REF / "ref_ismline_convol.txt"
 WRPLOT_REF_HLYMANA = {
     -1.0e20: REF / "ref_hlymana_1e20.txt",
     -5.0e20: REF / "ref_hlymana_5e20.txt",
@@ -64,7 +64,7 @@ WRPLOT_REF_CONVOL_ROT = REF / "ref_convol_rot.txt"
 
 
 # ---------------------------------------------------------------------------
-# OG.plot / OG2.plot parameters (Si III λ1206)
+# Si III λ1206 ISMLINE parameters (GAL + SMC components)
 # ---------------------------------------------------------------------------
 EBV = 0.14
 EBV_GAL = 0.06
@@ -79,7 +79,7 @@ ISM_L0 = 1206.51
 ISM_GAMM = 6.1e9
 ISM_F = 1.67
 ISM_A = 28.0
-GAUSS_FWHM = 0.5  # OG.plot COMMAND CONVOL GAUSS=0.5
+GAUSS_FWHM = 0.5  # combined ISMLINE + CONVOL GAUSS case
 
 
 def quiet(fn, *args, **kwargs):
@@ -218,29 +218,97 @@ def compare_in_window(model, xref, yref, lo, hi, direct=False):
     )
 
 
-def save_speedup_bar(labels, t_slow, t_fast, title, outfile, ylabel="Time [s]"):
-    """Bar chart of slow vs fast runtimes with speedup annotations."""
-    fig, ax = plt.subplots(figsize=(7.5, 3.8))
-    x = np.arange(len(labels))
-    w = 0.35
-    ts = np.asarray(t_slow, dtype=float)
-    tf = np.asarray(t_fast, dtype=float)
-    ax.bar(x - w / 2, ts, w, label="slow", color="C0")
-    ax.bar(x + w / 2, tf, w, label="fast", color="C3")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.legend(fontsize=8)
-    for i, (a, b) in enumerate(zip(ts, tf)):
-        if b > 0:
-            ax.text(i, max(a, b) * 1.05, f"{a / b:.0f}×", ha="center", fontsize=9)
-    fig.tight_layout()
-    path = OUTPUT / outfile
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+def _fmt_seconds(t):
+    """Human-readable duration."""
+    t = float(t)
+    if t < 1e-3:
+        return f"{t * 1e6:.1f} us"
+    if t < 1.0:
+        return f"{t * 1e3:.2f} ms"
+    return f"{t:.3f} s"
+
+
+def _write_table(path, title, notes, headers, rows_fmt):
+    lines = [title, "=" * len(title), ""]
+    if notes:
+        lines.extend(notes)
+        lines.append("")
+    widths = [max(len(h), max((len(r[i]) for r in rows_fmt), default=0))
+              for i, h in enumerate(headers)]
+    def fmt(cols):
+        return "  ".join(c.ljust(w) if i == 0 else c.rjust(w)
+                         for i, (c, w) in enumerate(zip(cols, widths)))
+    lines.append(fmt(headers))
+    lines.append("  ".join("-" * w for w in widths))
+    lines.extend(fmt(r) for r in rows_fmt)
+    lines.append("")
+    text = "\n".join(lines)
+    path.write_text(text)
     print(f"  wrote {path}")
+    print(text)
     return path
+
+
+def save_timing_table(rows, title, outfile, notes=None):
+    """
+    Pairwise slow-vs-fast timing (same API, two implementations).
+
+    Each row: case, t_slow, t_fast [s]; optional max_d_wrplot.
+    speedup = t_slow / t_fast.
+    """
+    path = OUTPUT / outfile
+    notes = list(notes or [])
+    notes.append("speedup = t(slow) / t(fast)  for that case")
+    fmt_rows = []
+    for r in rows:
+        ts, tf = float(r["t_slow"]), float(r["t_fast"])
+        sp = f"{ts / tf:.1f}x" if tf > 0 else "—"
+        dwr = r.get("max_d_wrplot")
+        d_s = ("—" if dwr is None or (isinstance(dwr, float) and np.isnan(dwr))
+               else f"{float(dwr):.2e}")
+        fmt_rows.append((
+            str(r["case"]),
+            _fmt_seconds(ts),
+            _fmt_seconds(tf),
+            sp,
+            d_s,
+        ))
+    return _write_table(
+        path, title, notes,
+        ("case", "slow", "fast", "speedup", "max|d| vs WRPLOT"),
+        fmt_rows,
+    )
+
+
+def save_benchmark_table(rows, title, outfile, baseline_case=None, notes=None):
+    """
+    Multi-config runtimes with speedup relative to a baseline case.
+
+    Each row: case, t [s]; optional max_d_wrplot.
+    speedup = t(baseline) / t(case).  Baseline row shows 1.0x.
+    """
+    path = OUTPUT / outfile
+    notes = list(notes or [])
+    by_name = {str(r["case"]): r for r in rows}
+    if baseline_case is None:
+        baseline_case = str(rows[0]["case"])
+    if baseline_case not in by_name:
+        raise KeyError(f"baseline_case={baseline_case!r} not in rows")
+    t0 = float(by_name[baseline_case]["t"])
+    notes.append(f"speedup = t({baseline_case}) / t(case)")
+    fmt_rows = []
+    for r in rows:
+        t = float(r["t"])
+        sp = f"{t0 / t:.1f}x" if t > 0 else "—"
+        dwr = r.get("max_d_wrplot")
+        d_s = ("—" if dwr is None or (isinstance(dwr, float) and np.isnan(dwr))
+               else f"{float(dwr):.2e}")
+        fmt_rows.append((str(r["case"]), _fmt_seconds(t), sp, d_s))
+    return _write_table(
+        path, title, notes,
+        ("case", "time", "speedup", "max|d| vs WRPLOT"),
+        fmt_rows,
+    )
 
 
 def savefig(fig, name):
@@ -251,7 +319,7 @@ def savefig(fig, name):
     return path
 
 
-def og_ism_kwargs_gal(**extra):
+def ism_kwargs_gal(**extra):
     kw = dict(
         coldens=CD_S_GAL,
         l0=ISM_L0,
@@ -265,7 +333,7 @@ def og_ism_kwargs_gal(**extra):
     return kw
 
 
-def og_ism_kwargs_smc(**extra):
+def ism_kwargs_smc(**extra):
     kw = dict(
         coldens=CD_S_SMC,
         l0=ISM_L0,
@@ -279,9 +347,9 @@ def og_ism_kwargs_smc(**extra):
     return kw
 
 
-def apply_og_ismlines(w, data, fast=False, **extra):
-    """Apply GAL then SMC Si III lines as in OG.plot / OG2.plot."""
+def apply_ismlines_gal_smc(w, data, fast=False, **extra):
+    """Apply GAL then SMC Si III λ1206 lines (test.plot ISMLINE case)."""
     fn = w.command_ismline_fast if fast else w.command_ismline
-    out = quiet(fn, data, **og_ism_kwargs_gal(**extra))
-    out = quiet(fn, out, **og_ism_kwargs_smc(**extra))
+    out = quiet(fn, data, **ism_kwargs_gal(**extra))
+    out = quiet(fn, out, **ism_kwargs_smc(**extra))
     return out

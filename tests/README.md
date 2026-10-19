@@ -9,10 +9,10 @@ WRPLOT. Tolerance for flux differences vs WRPLOT: **1e-4**.
 |------|------|
 | `test.plot` | WRPLOT script that writes reference spectra into `ref/` |
 | `run_wrplot_refs.sh` | Runs `wrplot test.plot +` to regenerate `ref/` |
-| `data/` | Input continua (IUE, UV, synthetic) used by WRPLOT and Python |
+| `data/` | Input continua used by WRPLOT and Python |
 | `ref/` | WRPLOT `COMMAND WRITE` tables (ground truth) |
-| `output/` | Comparison / speedup plots from the Python suite |
-| `run_all.py` | Unit tests + plot generation |
+| `output/` | QC spectrum plots (`.png`) and timing tables (`.txt`) |
+| `run_all.py` | Unit tests + QC output generation |
 
 ## 1. Generate WRPLOT references
 
@@ -24,8 +24,8 @@ cd tests
 # equivalent:  wrplot test.plot +
 ```
 
-This creates nine tables in `ref/` (ISMLINE, ISMLINE+CONVOL, HLYMANA, CONVOL
-gauss/box/rot).
+This creates nine tables in `ref/` (ISMLINE, ISMLINE+CONVOL, HLYMANA,
+CONVOL gauss/box/rot).
 
 ## 2. Run Python validation
 
@@ -35,15 +35,6 @@ From the repo root (needs the same Python env as `wrplot.py`, e.g. anaconda):
 /home/daniel/anaconda3/bin/python tests/run_all.py
 /home/daniel/anaconda3/bin/python tests/run_all.py --unit-only
 /home/daniel/anaconda3/bin/python tests/run_all.py --plots-only
-```
-
-Or individual modules:
-
-```bash
-cd tests
-python test_ismline.py
-python test_og_pipeline.py
-…
 ```
 
 ## Notes

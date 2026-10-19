@@ -9,7 +9,7 @@
 * Writes reference tables into ref/.
 * Input continua live in data/.
 *
-* Parameters for ISMLINE plots match OG.plot / OG2.plot (Si III λ1206).
+* ISMLINE uses two Si III λ1206 components (GAL + SMC).
 *******************************************************************************
 
  PAPERFORMAT A4Q BBROTATE
@@ -18,7 +18,7 @@
 
 
 *******************************************************************************
-* PLOT 1 — ISMLINE only (GAL + SMC Si III λ1206), like OG2.plot
+* PLOT 1 — ISMLINE only (GAL + SMC Si III λ1206)
 *******************************************************************************
  PLOT   : ref ISMLINE SiIII 1206 GAL+SMC
 
@@ -56,7 +56,7 @@ END
 
 
 *******************************************************************************
-* PLOT 2 — ISMLINE + CONVOL GAUSS=0.5, like OG.plot
+* PLOT 2 — ISMLINE (GAL+SMC) + CONVOL GAUSS=0.5
 *******************************************************************************
  PLOT   : ref ISMLINE + CONVOL GAUSS=0.5
 

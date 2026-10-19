@@ -1,0 +1,14 @@
+CONVOL timing (N=8001 pts, continuum_flat.dat)
+==============================================
+
+slow = command_convol,  fast = command_convol_fast
+Gauss/box slow and fast share the same numba kernel (~1x).
+
+case                      slow          fast     speedup    max|d| vs WRPLOT
+----------------  ------------  ------------  ----------  ------------------
+GAUSS FWHM=2.0         6.30 ms       6.32 ms        1.0x            5.33e-06
+BOX / KASTEN=2.0       1.01 ms       1.00 ms        1.0x            4.94e-11
+ROT Δλ=2.5 β=0.6     715.70 ms       3.25 ms      220.2x            4.96e-11
+GAUSS FWHM=0.5         2.04 ms       2.02 ms        1.0x                   —
+BOX half=1.0          794.3 us      795.5 us        1.0x                   —
+ROT Δλ=2.5 β=0       730.04 ms       3.29 ms      221.9x                   —

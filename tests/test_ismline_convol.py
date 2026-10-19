@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """
-End-to-end validation of the OG.plot pipeline against WRPLOT.
+Combined ISMLINE + CONVOL GAUSS validation against WRPLOT.
 
-Sequence (matches tests/test.plot plot 2 / OG.plot):
+Sequence (matches tests/test.plot plot 2):
   INCLUDE data/continuum_iue.dat
   ISMLINE Si III λ1206 GAL
   ISMLINE Si III λ1206 SMC
+  SORT JOIN
   CONVOL GAUSS=0.5
 
 Reference: ref/ref_ismline_convol.txt from ``./run_wrplot_refs.sh``.
@@ -22,21 +23,21 @@ import numpy as np
 from helpers import (
     ATOL_FLUX,
     GAUSS_FWHM,
-    WRPLOT_REF_CONVOL,
-    apply_og_ismlines,
+    WRPLOT_REF_ISMLINE_CONVOL,
+    apply_ismlines_gal_smc,
     compare_in_window,
     get_wrplotter,
     load_continuum_iue,
     load_ref,
     quiet,
-    save_speedup_bar,
+    save_benchmark_table,
     savefig,
 )
 
 
 def run_pipeline(w, model, *, fast_ism=False, fast_convol=False, **ism_extra):
-    out = apply_og_ismlines(w, model, fast=fast_ism, **ism_extra)
-    # Match WRPLOT test.plot: SORT JOIN before CONVOL (no-op if already unique)
+    out = apply_ismlines_gal_smc(w, model, fast=fast_ism, **ism_extra)
+    # Match WRPLOT test.plot: SORT JOIN before CONVOL
     out = quiet(w.command_sort, out)
     if fast_convol:
         out = quiet(
@@ -47,33 +48,32 @@ def run_pipeline(w, model, *, fast_ism=False, fast_convol=False, **ism_extra):
     return out
 
 
-class TestOGPipeline(unittest.TestCase):
+class TestIsmlineConvol(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.w = get_wrplotter()
         cls.model = load_continuum_iue(cls.w)
         tiny = quiet(cls.w.command_cut, cls.model, (1200, 1215), axis="x")
-        apply_og_ismlines(cls.w, tiny, fast=True, cut_ism=True, window=20.0)
+        apply_ismlines_gal_smc(cls.w, tiny, fast=True, cut_ism=True, window=20.0)
         cls.w.command_convol_fast(tiny, "gauss", GAUSS_FWHM)
 
     def test_slow_vs_wrplot(self):
-        if not WRPLOT_REF_CONVOL.is_file():
+        if not WRPLOT_REF_ISMLINE_CONVOL.is_file():
             self.skipTest(
                 "ref/ref_ismline_convol.txt missing — run ./run_wrplot_refs.sh"
             )
-        ref = load_ref(WRPLOT_REF_CONVOL)
+        ref = load_ref(WRPLOT_REF_ISMLINE_CONVOL)
         out = run_pipeline(
             self.w, self.model, fast_ism=False, fast_convol=False
         )
         st = compare_in_window(out, ref[:, 0], ref[:, 1], 1170.0, 1250.0)
         self.assertLess(
             st["max"], ATOL_FLUX,
-            msg=f"OG pipeline vs WRPLOT max|Δ|={st['max']:.3e} "
+            msg=f"ISMLINE+CONVOL vs WRPLOT max|Δ|={st['max']:.3e} "
                 f"rms={st['rms']:.3e}",
         )
 
     def test_fast_vs_slow(self):
-        # Window for speed
         model = quiet(self.w.command_cut, self.model, (1100.0, 1350.0), axis="x")
         slow = run_pipeline(self.w, model, fast_ism=False, fast_convol=False)
         fast = run_pipeline(
@@ -85,14 +85,14 @@ class TestOGPipeline(unittest.TestCase):
 
 
 def make_plots():
-    print("\n=== OG.plot pipeline validation ===")
+    print("\n=== ISMLINE + CONVOL GAUSS validation ===")
     w = get_wrplotter()
     model = quiet(w.command_cut, load_continuum_iue(w), (1100.0, 1350.0), axis="x")
     print(f"Windowed input: {len(model[0])} pts, "
           f"{model[0][0]:.1f}–{model[0][-1]:.1f} Å")
 
     tiny = quiet(w.command_cut, model, (1200, 1215), axis="x")
-    apply_og_ismlines(w, tiny, fast=True, cut_ism=True, window=20.0)
+    apply_ismlines_gal_smc(w, tiny, fast=True, cut_ism=True, window=20.0)
     w.command_convol_fast(tiny, "gauss", GAUSS_FWHM)
 
     configs = [
@@ -114,7 +114,10 @@ def make_plots():
         results[name] = dict(out=out, t=float(np.median(times)))
         print(f"  {name:16s}  {results[name]['t']:.3f}s  n={len(out[0])}")
 
-    ref = load_ref(WRPLOT_REF_CONVOL) if WRPLOT_REF_CONVOL.is_file() else None
+    ref = (
+        load_ref(WRPLOT_REF_ISMLINE_CONVOL)
+        if WRPLOT_REF_ISMLINE_CONVOL.is_file() else None
+    )
     slow = results["slow+slow"]["out"]
     print("\nAgreement 1170–1250 Å:")
     for name, res in results.items():
@@ -144,7 +147,7 @@ def make_plots():
     ax.set_ylim(0, 1.6)
     ax.set_ylabel("Normalised flux")
     ax.set_title(
-        "OG pipeline QC: ISMLINE×2 + CONVOL GAUSS=0.5 vs WRPLOT test.plot"
+        "ISMLINE×2 + CONVOL GAUSS=0.5 vs WRPLOT test.plot"
     )
     ax.legend(loc="upper right", fontsize=8)
 
@@ -166,16 +169,26 @@ def make_plots():
     ax.set_ylabel("Δ flux")
     ax.legend(fontsize=8)
     fig.tight_layout()
-    savefig(fig, "og_pipeline_comparison.png")
+    savefig(fig, "ismline_convol_comparison.png")
 
-    t_slow = results["slow+slow"]["t"]
-    save_speedup_bar(
-        ["slow+slow", "fast+fast", "fast_cut+fast"],
-        [t_slow, t_slow, t_slow],
-        [results[k]["t"] for k in ("slow+slow", "fast+fast", "fast_cut+fast")],
-        title="OG.plot pipeline runtime",
-        outfile="og_pipeline_speedup.png",
-        ylabel="Time [s]",
+    d_wr = (
+        compare_in_window(slow, ref[:, 0], ref[:, 1], 1170, 1250)["max"]
+        if ref is not None else None
+    )
+    save_benchmark_table(
+        [
+            dict(case=name, t=results[name]["t"], max_d_wrplot=d_wr)
+            for name in ("slow+slow", "fast+fast", "fast_cut+fast")
+        ],
+        title="ISMLINE + CONVOL GAUSS=0.5 timing",
+        outfile="ismline_convol_timing.txt",
+        baseline_case="slow+slow",
+        notes=[
+            "Pipeline: ISMLINE GAL+SMC → SORT → CONVOL GAUSS=0.5",
+            "slow+slow = command_ismline + command_convol",
+            "fast+fast = command_ismline_fast (full) + command_convol_fast",
+            "fast_cut+fast = command_ismline_fast (cut window) + command_convol_fast",
+        ],
     )
 
 
