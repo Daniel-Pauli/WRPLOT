@@ -513,6 +513,344 @@ def _hlymana_adaptive_refine(lam, flux, tau, xlam, c0, c1, a_arr, fak_arr, dndop
     return lam, flux, tau, iter_count
 
 
+# ---------------------------------------------------------------------------
+# REDDENING helpers (numba) for command_reddening
+# Law codes: 0=seaton 1=cardelli 2=fitzpatrick 3=lmc 4=smc 5=smc_bar
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _polynom_njit(x, coeff):
+    y = coeff[-1]
+    for i in range(len(coeff) - 2, -1, -1):
+        y = y * x + coeff[i]
+    return y
+
+
+@njit(cache=True)
+def _fspline_njit(xx, y, x):
+    """Cubic FSPLINE (same as wrplotter.__spline / Fortran FSPLINE)."""
+    n = len(x)
+    L = 1
+    while L < n:
+        if (xx - x[L - 1]) * (xx - x[L]) <= 0.0:
+            break
+        L += 1
+    if L >= n:
+        L = n - 1
+    d1 = 1.0 / (x[L] - x[L - 1])
+    d2 = d1 * d1
+    d3 = d1 * d2
+    d23 = d2 / 3.0
+    h11, h12, h13, h14 = d3, -d3, d23, 2.0 * d23
+    h21, h22, h23, h24 = -d1, 2.0 * d1, -1.0 / 3.0, -2.0 / 3.0
+    h31, h32, h33, h34 = -d3, d3, -2.0 * d23, -d23
+    h41, h42, h43, h44 = 2.0 * d1, -d1, 2.0 / 3.0, 1.0 / 3.0
+    la = L - 2 if L - 2 > 0 else 0
+    lb = L + 1 if L + 1 < n - 1 else n - 1
+    f1 = y[L - 1]
+    f2 = y[L]
+    f3 = (y[L] - y[la]) / (x[L] - x[la])
+    f4 = (y[lb] - y[L - 1]) / (x[lb] - x[L - 1])
+    p1 = h11 * f1 + h12 * f2 + h13 * f3 + h14 * f4
+    p2 = h21 * f1 + h22 * f2 + h23 * f3 + h24 * f4
+    p3 = h31 * f1 + h32 * f2 + h33 * f3 + h34 * f4
+    p4 = h41 * f1 + h42 * f2 + h43 * f3 + h44 * f4
+    dlm = xx - x[L - 1]
+    dl = x[L] - xx
+    return p1 * dlm * dlm * dlm + p2 * dlm + p3 * dl * dl * dl + p4 * dl
+
+
+@njit(cache=True)
+def _expand_largest_gaps_njit(x_in, y_in, n_target):
+    """
+    WRPLOT EXTINCT expansion: repeatedly insert the midpoint of the largest
+    |Δx| gap (linear Y) until len == n_target. Same rule as the slow path,
+    but without per-insert Python/numpy reallocations.
+    """
+    n0 = len(x_in)
+    if n0 >= n_target or n0 < 2:
+        return x_in.copy(), y_in.copy()
+    x = np.empty(n_target, dtype=np.float64)
+    y = np.empty(n_target, dtype=np.float64)
+    x[:n0] = x_in
+    y[:n0] = y_in
+    n = n0
+    while n < n_target:
+        d1 = -1.0
+        i_best = 0
+        for i in range(n - 1):
+            d = abs(x[i + 1] - x[i])
+            if d > d1:
+                d1 = d
+                i_best = i
+        xmid = 0.5 * (x[i_best] + x[i_best + 1])
+        ymid = 0.5 * (y[i_best] + y[i_best + 1])
+        for j in range(n - 1, i_best, -1):
+            x[j + 1] = x[j]
+            y[j + 1] = y[j]
+        x[i_best + 1] = xmid
+        y[i_best + 1] = ymid
+        n += 1
+    return x, y
+
+
+@njit(cache=True)
+def _reddening_kernel(
+    xlog,
+    ylog,
+    ebv,
+    law,
+    Rv,
+    Rfitz,
+    RSMC,
+    RLMC,
+    RSMCBAR,
+    fitz_yopir,
+    seaton_ftab,
+    seaton_ztab,
+    moneti_ftab,
+    moneti_xtab,
+    ex,
+    cx0,
+    cx1,
+    cx2,
+    ctab3,
+    ctab4,
+    ctab9,
+    ctab10,
+):
+    """
+    Apply EXTINCT-style reddening in-place on logλ / log(flux) arrays.
+    Returns modified ylog.
+    """
+    n = len(xlog)
+    out = ylog.copy()
+    coldens_fac = ebv * 3.8e21 * 0.4342944
+
+    for i in range(n):
+        xl = xlog[i]
+        if xl <= 2.959882:
+            # X-ray / Lyman continuum branch
+            e = 10.0 ** (1.0933705 - xl)
+            if e <= ex[-1]:
+                sigma = 0.0
+                if e < ex[0] and xl > 2.70265:
+                    xx = 10.0 ** xl / 911.76
+                    xinv = 1.0 / xx
+                    gaunt = (
+                        1.2302628
+                        + xx * (-0.50812150 + xx * 0.10631895)
+                        + (-3.1927214e-2 + (8.9105122e-4 + -1.1544111e-5 * xinv) * xinv)
+                        * xinv
+                    )
+                    sigma = 7.92e-18 * xx * xx * xx * gaunt
+                elif e < ex[0] and xl <= 2.70265:
+                    sigma = ((cx0[0] / e + cx1[0]) / e + cx2[0]) / e * 1e-24
+                else:
+                    j = 0
+                    dist = abs(e - ex[0])
+                    while True:
+                        if j + 1 >= len(ex):
+                            break
+                        d2 = abs(e - ex[j + 1])
+                        if d2 < dist:
+                            dist = d2
+                            j += 1
+                        else:
+                            break
+                    if j >= len(cx0):
+                        j = len(cx0) - 1
+                    sigma = ((cx0[j] / e + cx1[j]) / e + cx2[j]) / e * 1e-24
+                out[i] = out[i] - sigma * coldens_fac
+            continue
+
+        z = 10.0 ** (4.0 - xl)
+        f = 0.0
+
+        if law == 1 and z >= 0.41:
+            # Cardelli
+            xcar = z
+            if xcar < 3.3:
+                if xcar < 1.1:
+                    acar = 0.574 * xcar ** 1.61
+                    bcar = -0.527 * xcar ** 1.61
+                else:
+                    ycar = xcar - 1.82
+                    acar = _polynom_njit(ycar, ctab3)
+                    bcar = _polynom_njit(ycar, ctab4)
+            elif xcar < 8.0:
+                facar = 0.0
+                fbcar = 0.0
+                if xcar >= 5.9:
+                    dx = xcar - 5.9
+                    facar = -0.04473 * dx * dx - 0.009779 * dx * dx * dx
+                    fbcar = 0.2130 * dx * dx + 0.1207 * dx * dx * dx
+                acar = facar + 1.752 - 0.316 * xcar - 0.104 / ((xcar - 4.67) ** 2 + 0.341)
+                bcar = fbcar - 3.090 + 1.825 * xcar + 1.206 / ((xcar - 4.62) ** 2 + 0.263)
+            else:
+                xxcar = xcar - 8.0
+                acar = _polynom_njit(xxcar, ctab9)
+                bcar = _polynom_njit(xxcar, ctab10)
+            f = Rv * acar + bcar
+
+        elif (
+            (law == 2 and z > 0.25)
+            or (law == 4 and (z < 1.83 and z > 0.2))
+            or (law == 5 and (z <= 3.375 and z > 0.2))
+        ):
+            # Fitzpatrick (also SMC / SMC_BAR in the optical–IR bridge)
+            rf = Rfitz
+            if law == 4:
+                rf = RSMC
+            elif law == 5:
+                rf = RSMCBAR
+            fitz_c2 = -0.824 + 4.717 / rf
+            fitz_c1 = 2.030 - 3.007 * fitz_c2
+            if z >= 3.703704:
+                yuv = (
+                    fitz_c1
+                    + fitz_c2 * z
+                    + 3.23 * z * z / ((z * z - 4.596 ** 2) ** 2 + (z * 0.99) ** 2)
+                )
+                if z > 5.9:
+                    dz = z - 5.9
+                    yuv = yuv + 0.41 * (0.5392 * dz * dz + 0.05644 * dz * dz * dz)
+                f = yuv + rf
+            else:
+                # yopir was built for the call's default Rfitz; rebuild if SMC/SMC_BAR
+                if law == 4 or law == 5:
+                    yopir = np.empty(9, dtype=np.float64)
+                    yopir[0] = 0.0
+                    yopir[1] = 0.26469 * rf / 3.1
+                    yopir[2] = 0.82925 * rf / 3.1
+                    yopir[3] = -4.22809e-01 + 1.00270 * rf + 2.13572e-04 * rf * rf
+                    yopir[4] = -5.13540e-02 + 1.00216 * rf - 7.35778e-05 * rf * rf
+                    yopir[5] = 7.00127e-01 + 1.00184 * rf - 3.32598e-05 * rf * rf
+                    yopir[6] = (
+                        1.19456
+                        + 1.01707 * rf
+                        - 5.46959e-03 * rf * rf
+                        + 7.97809e-04 * rf * rf * rf
+                        - 4.45636e-05 * rf * rf * rf * rf
+                    )
+                    yopir[7] = (
+                        fitz_c1
+                        + fitz_c2 * 3.703704
+                        + (
+                            3.23
+                            * 3.703704 ** 2
+                            / (
+                                (3.703704 ** 2 - 4.596 ** 2) ** 2
+                                + (3.703704 * 0.99) ** 2
+                            )
+                        )
+                        + rf
+                    )
+                    yopir[8] = (
+                        fitz_c1
+                        + fitz_c2 * 3.846154
+                        + (
+                            3.23
+                            * 3.846154 ** 2
+                            / (
+                                (3.846154 ** 2 - 4.596 ** 2) ** 2
+                                + (3.846154 * 0.99) ** 2
+                            )
+                        )
+                        + rf
+                    )
+                    xopir = np.array(
+                        [
+                            0.0,
+                            0.377358,
+                            0.819672,
+                            1.666667,
+                            1.828153,
+                            2.141328,
+                            2.433090,
+                            3.703704,
+                            3.846154,
+                        ]
+                    )
+                    f = _fspline_njit(z, yopir, xopir)
+                else:
+                    xopir = np.array(
+                        [
+                            0.0,
+                            0.377358,
+                            0.819672,
+                            1.666667,
+                            1.828153,
+                            2.141328,
+                            2.433090,
+                            3.703704,
+                            3.846154,
+                        ]
+                    )
+                    f = _fspline_njit(z, fitz_yopir, xopir)
+
+        elif law == 3 and z >= 1.83:
+            if z <= 2.75:
+                zz = z - 1.83
+                f = RLMC + zz * (2.04 + 0.094 * zz)
+            else:
+                zz = z - 4.557
+                f = RLMC - 0.236 + z * (0.462 + 0.105 * z) + 0.454 / (zz * zz + 0.293)
+
+        elif law == 4 and z >= 1.83:
+            if z <= 2.75:
+                zz = z - 1.83
+                f = RSMC + zz * (2.04 + 0.094 * zz)
+            else:
+                zz = z - 4.557
+                f = RSMC - 0.236 + z * (0.462 + 0.105 * z) + 0.454 / (zz * zz + 0.293)
+
+        elif law == 5 and z > 3.375:
+            fz = 0.0
+            if z >= 5.9:
+                dz = z - 5.9
+                fz = 0.5392 * dz * dz + 0.05644 * dz * dz * dz
+            f = (
+                RSMCBAR
+                - 4.959
+                + 2.264 * z
+                + 0.389 * z * z / ((z * z - 21.16) ** 2 + z * z)
+                + 0.461 * fz
+            )
+
+        else:
+            # Seaton (+ Moneti IR for all laws that fall through)
+            if xl < 4.0:
+                if z < 2.7:
+                    f = _fspline_njit(z, seaton_ftab, seaton_ztab)
+                elif z <= 3.65:
+                    f = 1.56 + 1.048 * z + 1.01 / ((z - 4.6) ** 2 + 0.28)
+                elif z <= 7.14:
+                    f = 2.29 + 0.848 * z + 1.01 / ((z - 4.6) ** 2 + 0.28)
+                else:
+                    f = 16.17 + z * (0.2975 * z - 3.2)
+            else:
+                rvmoneti = 3.1
+                if law == 1:
+                    rvmoneti = 3.1 + (Rv - 3.1) * 1.4
+                elif law == 2:
+                    rvmoneti = Rfitz
+                elif law == 3:
+                    rvmoneti = RLMC
+                elif law == 4:
+                    rvmoneti = RSMC
+                elif law == 5:
+                    rvmoneti = RSMCBAR
+                if xl < 5.380:
+                    f = rvmoneti * _fspline_njit(xl, moneti_ftab, moneti_xtab)
+                else:
+                    f = rvmoneti * 0.0515 * 10.0 ** (2.0 * (5.380 - xl))
+
+        out[i] = out[i] - 0.4 * f * ebv
+
+    return out
+
+
 class wrplotter:
         
     def __init__(self):
@@ -2675,71 +3013,12 @@ class wrplotter:
         DL3 = DL * DL * DL
         return P1 * DLM3 + P2 * DLM + P3 * DL3 + P4 * DL
         
-    def command_reddening(self,dataset,ebv,law="seaton",Rv=-1,info=False):
+    def command_reddening_original(self,dataset,ebv,law="seaton",Rv=-1,info=False):
         """
-        Apply corrections for interstellar reddening. 
-        By default, HLYMAN uses the formalism from Groenewegen & Lamers (1989) which accounts only 
-        for the damping (i.e. Lorentzian) profiles but no Doppler cores. However, if one of the 
-        parameters T and/or VTURB is specified, HLYMAN applies Voigt profiles with the according 
-        Doppler velocity.
-        
-        Parameters
-        ----------
-        dataset: np.array or list
-            Dataset that should be modified.
-            First column should be log wavelenghts in Angstrom 
-            Second column should be log flux (i.e. in erg/s/cm^2/Ang)
-        ebv: int, float
-            Possible options: "EBV" or "ebv" or "COLDENS" or "coldens"
-            If EBV is used, the column density is calculated using n_H = 3.7e21*EBV (Groenewegen & Lamers 1989)
-        law: string
-            Reddening law that should be applied. 
-            Possible inputs: "SEATON", "seaton",            | Seaton (1979)
-                             "CARDELLI", "cardelli",        | Cardelli et al. (1989)
-                             "FITZPATRICK", "fitzpatrick"   | Fitzpatrick (1999)
-                             "LMC", "lmc",                  | Howarth (1983)
-                             "SMC", "smc",                  | Howarth (1983)
-                             "SMC_BAR", "smc_bar"           | Gordon et al. (2003)
-                             
-        Rv: int, float
-            RV = AV / EBV , where AV is the extinction in the V band.
-            Typically set by the law. 
+        Slow (pure-Python) EXTINCT reddening. Prefer ``command_reddening`` for
+        production use; this path is kept for validation against WRPLOT.
 
-             "SEATON",            | Rv = 3.1     (Nandy et al. (1975))
-             "CARDELLI",          | Rv = 3.1
-             "FITZPATRICK",       | Rv = 3.1
-             "LMC",               | Rv = 3.2
-             "SMC",               | Rv = 2.7     (Bouchet et al. (1985))
-             "SMC BAR",           | Rv = 2.74
-            
-            if Rv > -1:
-                use user input.
-
-                
-        temp: int, float
-            Temperature in Kelvin; 
-            if T > -1:
-                Account for Doppler broadening with the thermal velocity
-        vturb: int, float
-            Turbulence velocity in km/s
-            if vturb > -1:
-                additional Doppler broadening
-            
-        Returns
-        -------
-        The modified dataset.
-
-        Notes:
-        -------
-        The dataset must be monotonic. 
-        The dataset is automatically expanded to 1000 points if there are less.
-        All reddening laws are extended towards the red end (outside their “range”) according to a table from Moneti et al. (2001), 
-        above λ > 24 μm an extrapolation propto λ^(−2) is extended.
-        In the X-ray regime (λ = 1.24 − 413 Ang) the absorption is calculated according to Table 2 of Morrison & McCammon (1983). 
-        The edges in this wavelength range arise due to the K-shell absorption of different elements (a solar composition is assumed). 
-        In the range λ = 413 − 504 Ang (the He I edge) these tabulated polynoms are extrapolated.
-        In the range of λ = 504 − 911 Ang, i.e. between the Lyman edge of H and the He I edge, only the opacity of H I is considered 
-        in the same way as in the PoWR code (including the Gaunt factor).
+        Parameters and physics are identical to ``command_reddening``.
         """
              
         law = law.lower()
@@ -3007,6 +3286,9 @@ class wrplotter:
                             # is arbiitrary, just in order to make a smooth transition 
                             # of the Monati law at 2.44mu 
                             RVMONETI = 3.1 + (Rv - 3.1) * 1.4
+                        elif law == "fitzpatrick":
+                            # Match Fortran EXTINCT: RVMONETI = R_fitz for FITZPATRICK
+                            RVMONETI = Rfitz
                         elif law == "lmc":
                             RVMONETI = RLMC
                         elif law == "smc":
@@ -3037,6 +3319,193 @@ class wrplotter:
                 dataset[1][i] -= 0.4 * F * ebv     
         
         return dataset
+
+    def command_reddening(self, dataset, ebv, law="seaton", Rv=-1, info=False):
+        """
+        Fast version of ``command_reddening_original`` (WRPLOT EXTINCT).
+
+        Same physics and API as the slow path; uses a numba-accelerated expand
+        (largest-gap midpoints to 1000 points) and a numba reddening kernel.
+
+        Parameters
+        ----------
+        dataset: np.array or list
+            First column: log wavelengths in Angstrom.
+            Second column: log flux.
+        ebv: int, float
+            Colour excess E(B-V).
+        law: string
+            ``seaton``, ``cardelli``, ``fitzpatrick``, ``lmc``, ``smc``,
+            ``smc_bar`` (case-insensitive).
+        Rv: int, float
+            Optional R_V override where the law allows it (Cardelli, Fitzpatrick,
+            SMC). Defaults follow the slow path / Fortran EXTINCT.
+        info: bool
+            Kept for API compatibility (unused).
+
+        Returns
+        -------
+        np.ndarray
+            Modified dataset ``[log λ, log flux]``, expanded to ≥1000 points
+            when the input was shorter (same rule as WRPLOT).
+        """
+        law = law.lower()
+        law_map = {
+            "seaton": 0,
+            "cardelli": 1,
+            "fitzpatrick": 2,
+            "lmc": 3,
+            "smc": 4,
+            "smc_bar": 5,
+        }
+        if law not in law_map:
+            print("Error: Reddedning law not found.")
+            print("Possible laws are: seaton, cardelli, fitzpatrick, lmc, smc, smc_bar")
+            return
+
+        RLMC = 3.2
+        RSMC = 2.7
+        Rfitz = 3.1
+        RSMCBAR = 2.74
+        Rv_use = float(Rv)
+
+        if law == "cardelli":
+            if Rv_use < 0:
+                Rv_use = 3.1
+        elif law == "fitzpatrick":
+            if Rv_use > 0:
+                Rfitz = Rv_use
+        elif law == "smc":
+            if Rv_use > 0:
+                RSMC = Rv_use
+
+        if law == "seaton" and Rv > 0:
+            print("Warning: Law 'seaton' is implemented with a fixed Rv = 3.1")
+            print("Warning: Continuing with default value...")
+        elif law == "smc_bar" and Rv > 0:
+            print("Warning: Law 'smc_bar' is implemented with a fixed Rv = 2.74")
+            print("Warning: Continuing with default value...")
+        elif law == "lmc" and Rv > 0:
+            print("Warning: Law 'lmc' is implemented with a fixed Rv = 3.2")
+            print("If you want to change the Rv value here, use the law 'smc'.")
+            print("Warning: Continuing with default value...")
+
+        x = np.asarray(dataset[0], dtype=np.float64).copy()
+        y = np.asarray(dataset[1], dtype=np.float64).copy()
+        if not (np.sort(x) == x).all():
+            print("Warning: Dataset not monotonic.")
+            print("I will sort it for you.")
+            order = np.argsort(x)
+            x, y = x[order], y[order]
+
+        # Expand to 1000 points (WRPLOT EXTINCT rule)
+        x, y = _expand_largest_gaps_njit(x, y, 1000)
+
+        # Precompute Fitzpatrick optical spline knots for this Rfitz
+        fitz_c2 = -0.824 + 4.717 / Rfitz
+        fitz_c1 = 2.030 - 3.007 * fitz_c2
+        fitz_yopir = np.array([
+            0.0,
+            0.26469 * Rfitz / 3.1,
+            0.82925 * Rfitz / 3.1,
+            -4.22809e-01 + 1.00270 * Rfitz + 2.13572e-04 * Rfitz ** 2,
+            -5.13540e-02 + 1.00216 * Rfitz - 7.35778e-05 * Rfitz ** 2,
+            7.00127e-01 + 1.00184 * Rfitz - 3.32598e-05 * Rfitz ** 2,
+            (
+                1.19456
+                + 1.01707 * Rfitz
+                - 5.46959e-03 * Rfitz ** 2
+                + 7.97809e-04 * Rfitz ** 3
+                - 4.45636e-05 * Rfitz ** 4
+            ),
+            (
+                fitz_c1
+                + fitz_c2 * 3.703704
+                + (
+                    3.23
+                    * 3.703704 ** 2
+                    / ((3.703704 ** 2 - 4.596 ** 2) ** 2 + (3.703704 * 0.99) ** 2)
+                )
+                + Rfitz
+            ),
+            (
+                fitz_c1
+                + fitz_c2 * 3.846154
+                + (
+                    3.23
+                    * 3.846154 ** 2
+                    / ((3.846154 ** 2 - 4.596 ** 2) ** 2 + (3.846154 * 0.99) ** 2)
+                )
+                + Rfitz
+            ),
+        ], dtype=np.float64)
+
+        seaton_ftab = np.array(
+            [1.36, 1.44, 1.84, 2.04, 2.24, 2.44, 2.66, 2.88, 3.14, 3.36, 3.56,
+             3.77, 3.96, 4.15, 4.26, 4.40, 4.52, 4.64],
+            dtype=np.float64,
+        )
+        seaton_ztab = np.array(
+            [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2,
+             2.3, 2.4, 2.5, 2.6, 2.7],
+            dtype=np.float64,
+        )
+        moneti_ftab = np.array(
+            [0.4097, 0.2804, 0.1736, 0.1108, 0.0964, 0.0923, 0.0715,
+             0.0530, 0.0510, 0.0492, 0.0477, 0.0464, 0.0452, 0.0441,
+             0.0431, 0.0463, 0.0628, 0.0989, 0.1454, 0.1431, 0.1250,
+             0.1023, 0.0835, 0.0721, 0.0634, 0.0569, 0.0545, 0.0553,
+             0.0561, 0.0573, 0.0589, 0.0612, 0.0643, 0.0677, 0.0707,
+             0.0726, 0.0730, 0.0721, 0.0704, 0.0683, 0.0663, 0.0644,
+             0.0626, 0.0610, 0.0586, 0.0561, 0.0537, 0.0515],
+            dtype=np.float64,
+        )
+        moneti_xtab = np.array(
+            [4.000, 4.097, 4.217, 4.342, 4.398, 4.477, 4.544, 4.602,
+             4.653, 4.699, 4.740, 4.778, 4.813, 4.845, 4.875, 4.903,
+             4.929, 4.954, 4.978, 5.000, 5.021, 5.041, 5.061, 5.079,
+             5.097, 5.114, 5.130, 5.146, 5.161, 5.176, 5.190, 5.204,
+             5.217, 5.230, 5.243, 5.255, 5.267, 5.279, 5.290, 5.301,
+             5.312, 5.322, 5.332, 5.342, 5.352, 5.362, 5.371, 5.380],
+            dtype=np.float64,
+        )
+        ex = np.array(
+            [0.030, 0.100, 0.284, 0.400, 0.532, 0.707, 0.867, 1.303,
+             1.840, 2.471, 3.210, 4.038, 7.111, 8.331, 10.00],
+            dtype=np.float64,
+        )
+        cx0 = np.array(
+            [17.3, 34.6, 78.1, 71.4, 95.5, 308.9, 120.6,
+             141.3, 202.7, 342.7, 352.2, 433.9, 629.0, 701.2],
+            dtype=np.float64,
+        )
+        cx1 = np.array(
+            [608.1, 267.9, 18.8, 66.8, 145.8, -380.6, 169.3,
+             146.8, 104.7, 18.7, 18.7, -2.4, 30.9, 25.2],
+            dtype=np.float64,
+        )
+        cx2 = np.array(
+            [-2150., -476.1, 4.3, -51.4, -61.1, 294.0, -47.7,
+             -31.5, -17.0, 0.0, 0.0, 0.75, 0.0, 0.0],
+            dtype=np.float64,
+        )
+        ctab3 = np.array(
+            [1., 0.17699, -0.50447, -0.02427, 0.72085, 0.01979, -0.77530, 0.32999],
+            dtype=np.float64,
+        )
+        ctab4 = np.array(
+            [0., 1.41338, 2.28305, 1.07233, -5.38434, -0.62251, 5.30260, -2.09002],
+            dtype=np.float64,
+        )
+        ctab9 = np.array([-1.073, -0.628, 0.137, -0.070], dtype=np.float64)
+        ctab10 = np.array([13.670, 4.257, -0.420, 0.374], dtype=np.float64)
+
+        y_out = _reddening_kernel(
+            x, y, float(ebv), law_map[law], Rv_use, Rfitz, RSMC, RLMC, RSMCBAR,
+            fitz_yopir, seaton_ftab, seaton_ztab, moneti_ftab, moneti_xtab,
+            ex, cx0, cx1, cx2, ctab3, ctab4, ctab9, ctab10,
+        )
+        return np.array([x, y_out])
 
     def __plot_ident(self,text,id_x,id_xoff=0,id_y=1.05,id_len=0.05,id_fontsize=10,id_linesize=0.75,id_horizontal=False,color="black",bbox_alpha=0):
         """

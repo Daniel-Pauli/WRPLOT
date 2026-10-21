@@ -7,10 +7,10 @@ speedup = t(slow) / t(fast)  for that case
 
 case                       slow     fast  speedup  max|d| vs WRPLOT
 --------------------  ---------  -------  -------  ----------------
-flat N=-1e+20 (cut)   734.21 ms  2.30 ms   319.0x          4.97e-06
-flat N=-1e+20 (full)  734.21 ms  1.98 ms   371.5x          4.97e-06
-flat N=-5e+20 (cut)   706.18 ms  2.10 ms   336.7x          2.52e-06
-flat N=-5e+20 (full)  706.18 ms  1.82 ms   387.6x          2.52e-06
-flat N=-1e+21 (cut)   709.02 ms  2.06 ms   344.6x          1.75e-06
-flat N=-1e+21 (full)  709.02 ms  1.80 ms   393.1x          1.75e-06
-UV N=-1e20 (cut)      580.17 ms  3.16 ms   183.7x          3.85e-06
+flat N=-1e+20 (cut)   874.17 ms  2.52 ms   347.5x          4.97e-06
+flat N=-1e+20 (full)  874.17 ms  2.25 ms   388.0x          4.97e-06
+flat N=-5e+20 (cut)   843.07 ms  2.58 ms   326.6x          2.52e-06
+flat N=-5e+20 (full)  843.07 ms  2.38 ms   354.6x          2.52e-06
+flat N=-1e+21 (cut)   832.30 ms  2.41 ms   345.5x          1.75e-06
+flat N=-1e+21 (full)  832.30 ms  2.40 ms   347.2x          1.75e-06
+UV N=-1e20 (cut)      682.03 ms  3.26 ms   209.3x          3.85e-06

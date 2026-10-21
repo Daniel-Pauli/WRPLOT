@@ -24,8 +24,8 @@ cd tests
 # equivalent:  wrplot test.plot +
 ```
 
-This creates nine tables in `ref/` (ISMLINE, ISMLINE+CONVOL, HLYMANA,
-CONVOL gauss/box/rot).
+This creates tables in `ref/` (ISMLINE, ISMLINE+CONVOL, HLYMANA,
+CONVOL gauss/box/rot, and REDDENING for Seaton/Cardelli/Fitzpatrick/LMC/SMC/SMC_BAR).
 
 ## 2. Run Python validation
 
@@ -42,3 +42,8 @@ From the repo root (needs the same Python env as `wrplot.py`, e.g. anaconda):
 - No external `formal.plot` path is required; `data/continuum_iue.dat` is a
   portable 900–1400 Å extract of the `* IUE` continuum.
 - Parent directory `wrplot.py` is imported automatically via `helpers.py`.
+- REDDENING uses `data/continuum_reddening_flat.dat` (1000–1e5 Å, Y=0 ≡
+  log flux of 1). Fast path is `command_reddening` (numba); slow reference is
+  `command_reddening_original`. QC plots: `output/reddening_comparison.png`,
+  `output/reddening_rv_comparison.png`, `output/reddening_slow_fast.png`,
+  plus `output/reddening_timing.txt`.

@@ -7,9 +7,9 @@ speedup = t(slow) / t(fast)  for that case
 
 case                         slow      fast   speedup  max|d| vs WRPLOT
 -----------------------  --------  --------  --------  ----------------
-GAL+SMC full spectrum    10.436 s  763.4 us  13670.8x          1.37e-05
-GAL+SMC cut window=30 Å  10.436 s  478.5 us  21812.2x          1.37e-05
-synthetic N=-1e+13        1.502 s  255.3 us   5884.7x                 —
-synthetic N=-5e+13        1.516 s  238.6 us   6354.5x                 —
-synthetic N=-1e+14        1.507 s  232.7 us   6477.8x                 —
-synthetic N=-5e+14        1.514 s  223.2 us   6783.8x                 —
+GAL+SMC full spectrum    12.886 s   1.01 ms  12799.4x          1.37e-05
+GAL+SMC cut window=30 Å  12.886 s  562.8 us  22898.4x          1.37e-05
+synthetic N=-1e+13        1.847 s  261.2 us   7071.0x                 —
+synthetic N=-5e+13        1.845 s  224.4 us   8223.4x                 —
+synthetic N=-1e+14        1.814 s  258.8 us   7009.9x                 —
+synthetic N=-5e+14        1.823 s  231.5 us   7876.1x                 —

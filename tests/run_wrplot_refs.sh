@@ -44,7 +44,7 @@ rm -f wrplot.ps.* wrplot_scratch_* 2>/dev/null || true
 
 # '+' = automatic PostScript (non-GUI). Extra newlines satisfy any
 # "Enter Option" prompts between plots.
-printf '\n\n\n\n\n\n\n\n\n\n' | wrplot test.plot +
+printf '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' | wrplot test.plot +
 EXPECTED=(
   ref/ref_ismline.txt
   ref/ref_ismline_convol.txt
@@ -55,6 +55,14 @@ EXPECTED=(
   ref/ref_convol_gauss.txt
   ref/ref_convol_box.txt
   ref/ref_convol_rot.txt
+  ref/ref_reddening_seaton.txt
+  ref/ref_reddening_cardelli.txt
+  ref/ref_reddening_cardelli_rv5.txt
+  ref/ref_reddening_fitzpatrick.txt
+  ref/ref_reddening_fitzpatrick_rv5.txt
+  ref/ref_reddening_lmc.txt
+  ref/ref_reddening_smc.txt
+  ref/ref_reddening_smc_bar.txt
 )
 
 echo

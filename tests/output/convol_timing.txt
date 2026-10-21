@@ -8,9 +8,9 @@ speedup = t(slow) / t(fast)  for that case
 
 case                   slow      fast  speedup  max|d| vs WRPLOT
 ----------------  ---------  --------  -------  ----------------
-GAUSS FWHM=2.0    943.67 ms   6.32 ms   149.3x          4.99e-11
-BOX / KASTEN=2.0  373.44 ms  989.0 us   377.6x          4.94e-11
-ROT Δλ=2.5 β=0.6  730.74 ms   3.23 ms   226.3x          4.96e-11
-GAUSS FWHM=0.5    254.52 ms   2.09 ms   121.7x                 —
-BOX half=1.0      205.80 ms  791.9 us   259.9x                 —
-ROT Δλ=2.5 β=0    774.65 ms   3.29 ms   235.7x                 —
+GAUSS FWHM=2.0      1.157 s   7.97 ms   145.1x          4.99e-11
+BOX / KASTEN=2.0  471.31 ms   1.13 ms   416.5x          4.94e-11
+ROT Δλ=2.5 β=0.6  910.27 ms   3.82 ms   238.6x          4.96e-11
+GAUSS FWHM=0.5    293.79 ms   2.42 ms   121.4x                 —
+BOX half=1.0      236.51 ms  936.7 us   252.5x                 —
+ROT Δλ=2.5 β=0    879.64 ms   3.77 ms   233.1x                 —

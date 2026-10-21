@@ -1,0 +1,18 @@
+REDDENING timing (N_in=250 → 1000 pts, continuum_reddening_flat.dat)
+====================================================================
+
+slow = command_reddening_original (pure-Python expand + loop)
+fast = command_reddening (numba expand + reddening kernel)
+max|d| vs WRPLOT measured on the fast path
+speedup = t(slow) / t(fast)  for that case
+
+case                     slow      fast  speedup  max|d| vs WRPLOT
+------------------  ---------  --------  -------  ----------------
+SEATON              304.12 ms  629.2 us   483.3x          2.59e-08
+CARDELLI Rv=3.1     305.67 ms  648.2 us   471.5x          3.42e-08
+CARDELLI Rv=5.0     305.55 ms  711.2 us   429.6x          2.76e-08
+FITZPATRICK Rv=3.1  297.51 ms  666.1 us   446.7x          3.48e-08
+FITZPATRICK Rv=5.0  303.24 ms  660.1 us   459.4x          4.30e-09
+LMC                 301.46 ms  634.0 us   475.5x          3.30e-09
+SMC                 306.47 ms  619.7 us   494.5x          5.23e-09
+SMC_BAR             283.39 ms  613.8 us   461.7x          4.04e-10

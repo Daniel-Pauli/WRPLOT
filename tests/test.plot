@@ -253,3 +253,213 @@ COMMAND WRITE FILE=ref/ref_convol_rot.txt
 COMMAND INCLUDE data/continuum_flat.dat
 
 END
+
+
+*******************************************************************************
+* PLOT 10 — REDDENING SEATON EBV=1 on flat continuum (1000–1e5 Å)
+* Input Y=0 means log10(flux)=0. After XLOG + REDDENING + XDEX + YDEX the
+* WRITE table is linear λ vs reddened linear flux.
+*******************************************************************************
+ PLOT   : ref REDDENING SEATON EBV=1
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING SEATON reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 SEATON
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_seaton.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 11 — REDDENING CARDELLI EBV=1 (default Rv=3.1)
+*******************************************************************************
+ PLOT   : ref REDDENING CARDELLI EBV=1
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING CARDELLI reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 CARDELLI
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_cardelli.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 12 — REDDENING CARDELLI EBV=1 Rv=5.0
+*******************************************************************************
+ PLOT   : ref REDDENING CARDELLI EBV=1 Rv=5
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING CARDELLI Rv=5 reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 CARDELLI 5.0
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_cardelli_rv5.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 13 — REDDENING FITZPATRICK EBV=1 (default Rv=3.1)
+*******************************************************************************
+ PLOT   : ref REDDENING FITZPATRICK EBV=1
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING FITZPATRICK reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 FITZPATRICK
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_fitzpatrick.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 14 — REDDENING FITZPATRICK EBV=1 Rv=5.0 (IR Moneti scales with Rv)
+*******************************************************************************
+ PLOT   : ref REDDENING FITZPATRICK EBV=1 Rv=5
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING FITZPATRICK Rv=5 reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 FITZPATRICK 5.0
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_fitzpatrick_rv5.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 15 — REDDENING LMC EBV=1
+*******************************************************************************
+ PLOT   : ref REDDENING LMC EBV=1
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING LMC reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 LMC
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_lmc.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 16 — REDDENING SMC EBV=1 (default Rv=2.7)
+*******************************************************************************
+ PLOT   : ref REDDENING SMC EBV=1
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING SMC reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 SMC
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_smc.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END
+
+
+*******************************************************************************
+* PLOT 17 — REDDENING SMC_BAR EBV=1
+*******************************************************************************
+ PLOT   : ref REDDENING SMC_BAR EBV=1
+
+\INSTRUCTION EXPORT
+\INSTRUCTION NO-EXPORT
+
+HEADER :\CENTER\REDDENING SMC_BAR reference
+X-ACHSE:\CENTER\#l# / \A
+Y-ACHSE:\CENTER\Flux
+    MASSTAB    MINIMUM    MAXIMUM    TEILUNGEN  BESCHRIFT. DARUNTER
+X:   23CM           1000.    100000.        50        100        0.
+Y:   14CM          0        1.5       2        5        0.
+
+N=? XYTABLE COLOR=2
+COMMAND XLOG
+COMMAND REDDENING 1 SMC_BAR
+COMMAND XDEX
+COMMAND YDEX
+COMMAND WRITE FILE=ref/ref_reddening_smc_bar.txt
+COMMAND INCLUDE data/continuum_reddening_flat.dat
+
+END

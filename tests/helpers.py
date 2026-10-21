@@ -48,6 +48,7 @@ ATOL_FLUX = 1e-4
 CONTINUUM_IUE = DATA / "continuum_iue.dat"       # * IUE 900–1400 Å
 CONTINUUM_FLAT = DATA / "continuum_flat.dat"     # synthetic absorption
 CONTINUUM_LYMAN_FLAT = DATA / "continuum_lyman_flat.dat"  # flat 900–1300 Å
+CONTINUUM_REDDENING_FLAT = DATA / "continuum_reddening_flat.dat"  # 1e3–1e5 Å, Y=0
 UV_SPECTRUM = DATA / "uv_spectrum.dat"          # UV continuum 900–1400 Å
 
 WRPLOT_REF_ISMLINE = REF / "ref_ismline.txt"
@@ -61,6 +62,19 @@ WRPLOT_REF_HLYMANA_UV = REF / "ref_hlymana_uv_1e20.txt"
 WRPLOT_REF_CONVOL_GAUSS = REF / "ref_convol_gauss.txt"
 WRPLOT_REF_CONVOL_BOX = REF / "ref_convol_box.txt"
 WRPLOT_REF_CONVOL_ROT = REF / "ref_convol_rot.txt"
+
+# REDDENING refs: EBV=1 on continuum_reddening_flat.dat (test.plot plots 10–17)
+REDDENING_EBV = 1.0
+WRPLOT_REF_REDDENING = {
+    "seaton": REF / "ref_reddening_seaton.txt",
+    "cardelli": REF / "ref_reddening_cardelli.txt",
+    "cardelli_rv5": REF / "ref_reddening_cardelli_rv5.txt",
+    "fitzpatrick": REF / "ref_reddening_fitzpatrick.txt",
+    "fitzpatrick_rv5": REF / "ref_reddening_fitzpatrick_rv5.txt",
+    "lmc": REF / "ref_reddening_lmc.txt",
+    "smc": REF / "ref_reddening_smc.txt",
+    "smc_bar": REF / "ref_reddening_smc_bar.txt",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +142,30 @@ def load_continuum_flat(w=None):
 
 def load_continuum_lyman_flat(w=None):
     return load_xy(CONTINUUM_LYMAN_FLAT, w)
+
+
+def load_continuum_reddening_flat(w=None):
+    """Flat Y=0 continuum (log flux of 1) spanning 1000–1e5 Å for REDDENING."""
+    return load_xy(CONTINUUM_REDDENING_FLAT, w)
+
+
+def apply_reddening_linear(w, data, ebv, law="seaton", Rv=-1, fast=True):
+    """
+    Apply reddening matching WRPLOT test.plot plots 10–17:
+    XLOG → REDDENING → XDEX → YDEX.  ``data`` is linear λ with Y already in
+    log-flux units (0 ≡ flux 1), as in continuum_reddening_flat.dat.
+    Returns linear λ vs linear flux.
+
+    fast=True  → ``command_reddening`` (numba)
+    fast=False → ``command_reddening_original``
+    """
+    logx = quiet(w.command_log, data, axis="x")
+    kw = dict(ebv=ebv, law=law)
+    if Rv > 0:
+        kw["Rv"] = Rv
+    fn = w.command_reddening if fast else w.command_reddening_original
+    out_log = quiet(fn, np.array([logx[0].copy(), logx[1].copy()]), **kw)
+    return quiet(w.command_dex, out_log)
 
 
 def _fix_fortran_dexp(text: str) -> str:
