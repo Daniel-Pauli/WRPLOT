@@ -28,6 +28,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(TESTS / ".mplconfig"))
 import test_arith  # noqa: E402
 import test_convol  # noqa: E402
 import test_hlymana  # noqa: E402
+import test_idents  # noqa: E402
 import test_ismline  # noqa: E402
 import test_ismline_convol  # noqa: E402
 import test_reddening  # noqa: E402
@@ -40,6 +41,7 @@ PLOT_MODULES = [
     ("ISMLINE+CONVOL", test_ismline_convol.make_plots),
     ("HLYMANA", test_hlymana.make_plots),
     ("REDDENING", test_reddening.make_plots),
+    ("IDENTS", test_idents.make_plots),
 ]
 
 UNIT_MODULES = [
@@ -50,6 +52,7 @@ UNIT_MODULES = [
     test_ismline_convol,
     test_hlymana,
     test_reddening,
+    test_idents,
 ]
 
 

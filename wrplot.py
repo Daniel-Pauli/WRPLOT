@@ -41,6 +41,20 @@ def _is_monotonic_ascending(x):
 # Module-level constants (avoid rebuilding on every command_* call)
 # ---------------------------------------------------------------------------
 
+# WRPLOT default colors 0..9 (wr_info.pdf Sect. 3.4.1 / Fig. 3), RGB in [0, 1]
+_WRPLOT_COLORS = {
+    0: (1.0, 1.0, 1.0),  # white
+    1: (0.0, 0.0, 0.0),  # black
+    2: (1.0, 0.0, 0.0),  # red
+    3: (0.0, 1.0, 0.0),  # green
+    4: (0.0, 0.0, 1.0),  # dark blue
+    5: (1.0, 1.0, 0.0),  # yellow
+    6: (1.0, 0.0, 1.0),  # pink
+    7: (0.0, 1.0, 1.0),  # light blue
+    8: (0.5, 1.0, 0.0),  # light green
+    9: (0.0, 0.5, 1.0),  # blue
+}
+
 # H Lyman line atomic data (shared by command_hlymana / _original)
 _HLY_XLAM0 = np.float64([
     1215.671, 1025.722, 972.5366, 949.74297,
@@ -3809,18 +3823,19 @@ class wrplotter:
 
         return par
 
-    def plot_idents(self, file, id_xoff=0,id_y=1.05,id_len=0.05,id_fontsize=12,id_linesize=0.75,id_horizontal=False,color="black",bbox_alpha=0):
+    def plot_idents_original(self, file, id_xoff=0,id_y=1.05,id_len=0.05,id_fontsize=12,id_linesize=0.75,id_horizontal=False,color="black",bbox_alpha=0):
         """
-        Read and plot line identifications from a file.
-        
+        Read and plot line identifications from a file (legacy implementation).
+
+        Prefer ``plot_idents``, which preserves WRPLOT text notation (colors,
+        sub/superscripts, fonts, etc.).
+
         Parameters
         ----------
         file: str
             File containing the line identifications
-        id_x: np.array or list
-            Array containing the wavelenghts of the lines where the text should point to.
         id_xoff: int, float
-            Offset of the text to the line identification. Often used to avoid that text overlaps.                 
+            Offset of the text to the line identification. Often used to avoid that text overlaps.
         id_y: int, float
             Y value, where the line should start.
         id_len: int, float
@@ -3829,7 +3844,7 @@ class wrplotter:
             Fontsize of the text that should be displayed.
         id_linesize: int, float
             Width of the line.
-        id_horitontal: bool
+        id_horizontal: bool
             Normally the text is shown vertically over the spectrum to save space.
             If True: Shows the text horizontally.
         bbox_alpha: float
@@ -3838,7 +3853,7 @@ class wrplotter:
 
         Notes:
         -------
-        This is inspired by WRPLOT, but not the actual implementation.
+        This is inspired by WRPLOT, but strips most WRPLOT text prefixes (including colors).
         """
         _ensure_plotting()
         
@@ -3961,7 +3976,672 @@ class wrplotter:
                 # avoid overflow of plotting box
                 if center+offs < xmax:
                     text_boxes.append(self.__plot_idmult(text[i],wavelenghts[i],id_xoff=offs,id_y=id_ys[i],id_len=id_len,id_fontsize=id_fontsize,id_linesize=id_linesize,id_horizontal=id_horizontal,color=color,bbox_alpha=bbox_alpha))
-    
+
+
+    # ------------------------------------------------------------------
+    # WRPLOT-style line identifications (notation-faithful plot_idents)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def __wrplot_color(index, fallback="black"):
+        """Map WRPLOT color index 0..9 to an RGB tuple."""
+        try:
+            return _WRPLOT_COLORS[int(index)]
+        except (KeyError, TypeError, ValueError):
+            return fallback
+
+    def __parse_wrplot_text(self, raw, default_color="black"):
+        """
+        Parse a WRPLOT identification string into styled segments.
+
+        Honours Table 2 prefixes from wr_info.pdf (colors, sub/superscripts,
+        italics/bold, letter spacing, inclination, local fonts) and the
+        symbol / Greek substitutions used in identification files.
+        """
+        if raw is None:
+            return []
+        s = raw.strip().strip('"').strip("'").replace("\n", "")
+        if not s:
+            return []
+
+        color = default_color
+        italic = False
+        bold = False
+        quasi_bold = False
+        script = "normal"  # normal | sub | super
+        tracking = "normal"  # normal | compact | broad
+        incline = "none"  # none | right | left
+        family = None
+
+        greek = {
+            "a": r"\alpha", "A": r"A",
+            "b": r"\beta", "B": r"B",
+            "g": r"\gamma", "G": r"\Gamma",
+            "d": r"\delta", "D": r"\Delta",
+            "e": r"\epsilon", "E": r"E",
+            "z": r"\zeta", "Z": r"\zeta",
+            "h": r"\eta", "H": r"H",
+            "q": r"\theta", "Q": r"\Theta",
+            "i": r"\iota", "I": r"I",
+            "k": r"\kappa", "K": r"K",
+            "l": r"\lambda", "L": r"\Lambda",
+            "m": r"\mu", "M": r"M",
+            "n": r"\nu", "N": r"N",
+            "x": r"\xi", "X": r"\Xi",
+            "p": r"\pi", "P": r"\Pi",
+            "r": r"\rho", "R": r"R",
+            "s": r"\sigma", "S": r"\Sigma",
+            "t": r"\tau", "T": r"T",
+            "u": r"\upsilon", "U": r"\Upsilon",
+            "f": r"\phi", "F": r"\Phi",
+            "c": r"\chi", "C": r"X",
+            "y": r"\psi", "Y": r"\Psi",
+            "w": r"\omega", "W": r"\Omega",
+        }
+        backslash_syms = {
+            "o": r"\cdot",
+            "S": r"_{\odot}",
+            "A": r"\mathrm{\AA}",
+            "M": r"\dot{M}",
+            "8": r"_{\infty}",
+            "*": r"\ast",
+            ">": r"\rightarrow",
+            "<": r"\leftarrow",
+            "+": r"\pm",
+            ",": r"\,",
+            " ": r"\ ",
+        }
+        umlauts = {
+            "a": "ä", "o": "ö", "u": "ü",
+            "A": "Ä", "O": "Ö", "U": "Ü",
+            "s": "ß",
+        }
+
+        segments = []
+        buf = []
+
+        def _flush():
+            if not buf:
+                return
+            segments.append({
+                "text": "".join(buf),
+                "color": color,
+                "italic": italic,
+                "bold": bold or quasi_bold,
+                "script": script,
+                "tracking": tracking,
+                "incline": incline,
+                "family": family,
+            })
+            buf.clear()
+
+        i = 0
+        n = len(s)
+        while i < n:
+            ch = s[i]
+            if ch == "&":
+                if i + 1 < n and s[i + 1] == "&":
+                    _flush()
+                    buf.append("&")
+                    i += 2
+                    continue
+                if s.startswith("&PW", i) or s.startswith("&PT", i) or s.startswith("&PH", i):
+                    _flush()
+                    tag = s[i + 1:i + 3]
+                    family = {"PW": "sans-serif", "PT": "serif", "PH": "sans-serif"}[tag]
+                    i += 3
+                    continue
+                if i + 1 >= n:
+                    i += 1
+                    continue
+                code = s[i + 1]
+                if code.isdigit():
+                    _flush()
+                    color = self.__wrplot_color(code, fallback=default_color)
+                    i += 2
+                    continue
+                if code == "T":
+                    _flush(); script = "sub"; i += 2; continue
+                if code == "H":
+                    _flush(); script = "super"; i += 2; continue
+                if code == "M":
+                    _flush(); script = "normal"; i += 2; continue
+                if code == "E":
+                    _flush(); tracking = "compact"; i += 2; continue
+                if code == "B":
+                    _flush(); tracking = "broad"; i += 2; continue
+                if code == "I":
+                    _flush(); italic = True; i += 2; continue
+                if code == "N":
+                    # reset inclination / letter spacing / quasi-bold (not color/bold/script)
+                    _flush()
+                    italic = False
+                    tracking = "normal"
+                    incline = "none"
+                    quasi_bold = False
+                    i += 2
+                    continue
+                if code == "R":
+                    _flush(); incline = "right"; italic = True; i += 2; continue
+                if code == "L":
+                    _flush(); incline = "left"; italic = False; i += 2; continue
+                if code == "G":
+                    _flush(); incline = "none"; italic = False; i += 2; continue
+                if code == "F":
+                    _flush(); bold = True; i += 2; continue
+                if code == "f":
+                    _flush(); bold = False; i += 2; continue
+                if code == "W":
+                    _flush(); quasi_bold = True; i += 2; continue
+                if code in umlauts:
+                    _flush()
+                    buf.append(umlauts[code])
+                    i += 2
+                    continue
+                # unknown &X — skip
+                i += 2
+                continue
+
+            if ch == "#" and i + 2 < n and s[i + 2] == "#":
+                # keep Greek in the same segment (do not flush)
+                buf.append(greek.get(s[i + 1], s[i + 1]))
+                i += 3
+                continue
+
+            if ch == "\\":
+                # keep symbols (\, etc.) in the same segment
+                if i + 1 < n:
+                    key = s[i + 1]
+                    buf.append(backslash_syms.get(key, key))
+                    i += 2
+                else:
+                    i += 1
+                continue
+
+            buf.append(ch)
+            i += 1
+
+        _flush()
+        return [seg for seg in segments if seg["text"]]
+
+    @staticmethod
+    def __wrplot_segment_mathtext(text, script="normal", keep_leading_space=False):
+        """
+        Build matplotlib mathtext for one styled segment.
+
+        Plain runs go in ``\\mathrm{...}``; WRPLOT thin spaces (``\\,``) become
+        ``\\,\\,`` *between* those runs (matplotlib often swallows a single
+        ``\\,`` inside ``\\mathrm``). Greek / other math commands stay outside
+        ``\\mathrm`` so they render correctly, e.g.
+        ``O\\,I\\,(is)`` → ``$\\mathrm{O}\\,\\,\\mathrm{I}\\,\\,\\mathrm{(is)}$``,
+        ``Ly\\epsilon`` → ``$\\mathrm{Ly}\\epsilon$``.
+
+        If ``keep_leading_space`` is True (used for segments after a mid-string
+        style/color break), a leading ``\\,`` is kept so the gap before e.g.
+        ``(is)`` is not lost across separate Text artists.
+        """
+        # Tokenize into ('text', str), ('thin',), ('cmd', str), ('space',)
+        tokens = []
+        i = 0
+        buf = []
+
+        def _flush_text():
+            if not buf:
+                return
+            tokens.append(("text", "".join(buf)))
+            buf.clear()
+
+        while i < len(text):
+            if text[i] == "\\" and i + 1 < len(text):
+                _flush_text()
+                j = i + 1
+                if text[j].isalpha():
+                    while j < len(text) and text[j].isalpha():
+                        j += 1
+                    tokens.append(("cmd", text[i:j]))
+                    i = j
+                elif text[j] == ",":
+                    tokens.append(("thin",))
+                    i += 2
+                else:
+                    tokens.append(("cmd", text[i:i + 2]))
+                    i += 2
+                continue
+            if text[i] in " \t":
+                _flush_text()
+                tokens.append(("space",))
+                i += 1
+                continue
+            c = text[i]
+            if c in "{}#$%&_":
+                buf.append("\\" + c)
+            else:
+                buf.append(c)
+            i += 1
+        _flush_text()
+
+        parts = []
+        for tok in tokens:
+            kind = tok[0]
+            if kind == "text":
+                parts.append(r"\mathrm{" + tok[1] + "}")
+            elif kind == "cmd":
+                parts.append(tok[1])
+            elif kind in ("thin", "space"):
+                # Double thin space: visible in Agg mathtext (single \, inside
+                # \mathrm is often swallowed)
+                parts.append(r"\,\,")
+
+        # Collapse runs of spacers; optionally keep a leading spacer
+        cleaned = []
+        for p in parts:
+            if p == r"\,\,":
+                if cleaned and cleaned[-1] != r"\,\,":
+                    cleaned.append(p)
+                elif not cleaned and keep_leading_space:
+                    cleaned.append(p)
+            else:
+                cleaned.append(p)
+        if not keep_leading_space:
+            while cleaned and cleaned[0] == r"\,\,":
+                cleaned.pop(0)
+        while cleaned and cleaned[-1] == r"\,\,":
+            cleaned.pop()
+
+        core = "".join(cleaned) if cleaned else r"\mathrm{}"
+        if script == "sub":
+            return r"$_{" + core + "}$"
+        if script == "super":
+            return r"$^{" + core + "}$"
+        return r"$" + core + "$"
+
+    def __draw_wrplot_label(self, x, y, segments, fontsize=12, horizontal=False,
+                            bbox_alpha=0):
+        """
+        Draw a multi-style WRPLOT label at (x, y).
+
+        Vertical (default): segments advance in +y (string reads upward).
+        Horizontal: segments advance in +x.
+
+        Returns [x_left, x_right] of the full label in data coordinates.
+        """
+        ax = plt.gca()
+        rotation = 0 if horizontal else 90
+        from matplotlib.transforms import Affine2D
+
+        # &E / &B: scale along the baseline (~30% as in WRPLOT)
+        track_scale = {"normal": 1.0, "compact": 0.70, "broad": 1.30}
+        script_scale = 0.75
+
+        def _seg_starts_with_space(seg):
+            t = seg["text"]
+            return bool(t) and (t[0] in " \t" or t.startswith(r"\,"))
+
+        def _seg_ends_with_space(seg):
+            t = seg["text"]
+            return bool(t) and (t[-1] in " \t" or t.endswith(r"\,"))
+
+        def _needs_inter_seg_gap(prev, cur):
+            # \, may land on either side of a mid-string &n / style break
+            return _seg_starts_with_space(cur) or _seg_ends_with_space(prev)
+
+        def _apply_tracking_transform(text_artist, seg, px, py):
+            """Anchor &E/&B (and &L) scale/skew at the segment's own position."""
+            sx = track_scale.get(seg["tracking"], 1.0)
+            extra = Affine2D()
+            if seg["incline"] == "left":
+                extra = extra.skew_deg(-12, 0)
+            if sx != 1.0:
+                if horizontal:
+                    extra = (
+                        extra.translate(-px, -py).scale(sx, 1.0).translate(px, py)
+                    )
+                else:
+                    extra = (
+                        extra.translate(-px, -py).scale(1.0, sx).translate(px, py)
+                    )
+            if seg["incline"] == "left" or sx != 1.0:
+                text_artist.set_transform(extra + ax.transData)
+            else:
+                text_artist.set_transform(ax.transData)
+
+        # Affine &E/&B scaling fights multi-segment stacking (wrong visual
+        # extents); apply tracking only for single-segment labels.
+        multi = len(segments) > 1
+
+        texts = []
+        for i, seg in enumerate(segments):
+            # Cross-break \, is applied as a data-coord gap when stacking
+            # (Agg often ignores leading \,\, in mathtext).
+            math = self.__wrplot_segment_mathtext(
+                seg["text"], script=seg["script"], keep_leading_space=False,
+            )
+            fs = fontsize * (script_scale if seg["script"] != "normal" else 1.0)
+            family = seg["family"] or "sans-serif"
+            style = "italic" if (seg["italic"] or seg["incline"] == "right") else "normal"
+            weight = "bold" if seg["bold"] else "normal"
+            t = ax.text(
+                x, y, math,
+                rotation=rotation,
+                fontsize=fs,
+                color=seg["color"],
+                fontfamily=family,
+                fontstyle=style,
+                fontweight=weight,
+                ha="center" if not horizontal else "left",
+                va="bottom" if not horizontal else "center",
+                bbox=dict(facecolor="white", alpha=bbox_alpha, edgecolor="none", pad=0),
+                clip_on=False,
+            )
+            if not multi:
+                _apply_tracking_transform(t, seg, x, y)
+            texts.append(t)
+
+        if not texts:
+            return [float(x), float(x)]
+
+        fig = ax.get_figure()
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        inv = ax.transData.inverted()
+
+        def _baseline_gap_data(px, py, fontsize_pts):
+            """
+            Extra advance along the text baseline when a mid-string ``\\,`` was
+            split across Text artists.
+
+            Slightly under a double thin space so multi-color breaks (e.g. VI
+            then (is)) read as about half a space (~0.2 em).
+            """
+            gap_pts = 0.20 * fontsize_pts
+            gap_pix = gap_pts * fig.dpi / 72.0
+            p0 = ax.transData.transform((px, py))
+            if horizontal:
+                p1 = (p0[0] + gap_pix, p0[1])
+            else:
+                p1 = (p0[0], p0[1] + gap_pix)
+            d0 = inv.transform(p0)
+            d1 = inv.transform(p1)
+            return float(d1[0] - d0[0]), float(d1[1] - d0[1])
+
+        # Stack segments along the baseline
+        for i in range(1, len(texts)):
+            bb = texts[i - 1].get_window_extent(renderer=renderer)
+            fs_i = fontsize * (
+                script_scale if segments[i]["script"] != "normal" else 1.0
+            )
+            if horizontal:
+                nx, ny = inv.transform((bb.x1, 0.5 * (bb.y0 + bb.y1)))
+                pos = (float(nx), float(y))
+            else:
+                _nx, ny = inv.transform((0.5 * (bb.x0 + bb.x1), bb.y1))
+                pos = (float(x), float(ny))
+            if _needs_inter_seg_gap(segments[i - 1], segments[i]):
+                gdx, gdy = _baseline_gap_data(pos[0], pos[1], fs_i)
+                pos = (pos[0] + gdx, pos[1] + gdy)
+            texts[i].set_position(pos)
+            # Refresh extent for the next stacking step
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+
+        xs = []
+        for t in texts:
+            bb = t.get_window_extent(renderer=renderer)
+            corners = inv.transform([
+                (bb.x0, bb.y0), (bb.x1, bb.y0),
+                (bb.x0, bb.y1), (bb.x1, bb.y1),
+            ])
+            xs.extend(corners[:, 0])
+        return [float(min(xs)), float(max(xs))]
+
+    def __measure_wrplot_label_xspan(self, ax, x, y, segments, fontsize=12,
+                                     horizontal=False):
+        """
+        Measure the data-x span of a label without leaving artists on the axes.
+        """
+        # Draw temporarily, measure, remove
+        n_before = len(ax.texts)
+        box = self.__draw_wrplot_label(
+            x, y, segments, fontsize=fontsize, horizontal=horizontal, bbox_alpha=0,
+        )
+        # remove texts we just added
+        while len(ax.texts) > n_before:
+            ax.texts[-1].remove()
+        return box
+
+    def __plot_ident_mark(self, id_x, id_xoff, id_y, id_len, id_linesize, color):
+        """Draw the three-piece IDENT tick (WRPLOT-like proportions)."""
+        # Defaults close to IDMLENG a=0.43, b=0.43 → lower/mid/upper
+        a, b = 0.43, 0.43
+        y0 = id_y
+        y1 = id_y + id_len * a
+        y2 = id_y + id_len * (a + b)
+        y3 = id_y + id_len
+        plt.plot([id_x, id_x], [y0, y1], "-", color=color, lw=id_linesize)
+        plt.plot([id_x, id_x + id_xoff], [y1, y2], "-", color=color, lw=id_linesize)
+        plt.plot([id_x + id_xoff, id_x + id_xoff], [y2, y3], "-", color=color, lw=id_linesize)
+        return y3
+
+    def __plot_idmult_mark(self, id_x, id_xoff, id_y, id_len, id_linesize, color):
+        """Draw the IDMULT comb + connector to the label."""
+        id_x = list(id_x)
+        a, b = 0.43, 0.43
+        y0 = id_y
+        y1 = id_y + id_len * a
+        y2 = id_y + id_len * (a + b)
+        y3 = id_y + id_len
+        for xv in id_x:
+            plt.plot([xv, xv], [y0, y1], "-", color=color, lw=id_linesize)
+        plt.plot([id_x[0], id_x[-1]], [y1, y1], "-", color=color, lw=id_linesize)
+        center = 0.5 * (id_x[0] + id_x[-1])
+        plt.plot([center, center + id_xoff], [y1, y2], "-", color=color, lw=id_linesize)
+        plt.plot([center + id_xoff, center + id_xoff], [y2, y3], "-", color=color, lw=id_linesize)
+        return y3, center
+
+    def __parse_ident_file(self, file, xmin, xmax, default_id_y, default_id_len,
+                           default_color):
+        """
+        Parse a WRPLOT identification file into items in file order.
+
+        Honours \\IDENT / \\IDMULT, and file-local \\IDY / \\IDLENG (optional
+        ``U`` = y-units; bare values are also treated as y-units).
+        """
+        items = []
+        id_y = default_id_y
+        id_len = default_id_len
+
+        def _parse_unit_value(line, command):
+            line = line.replace(command, "")
+            line = line.replace("=", "")
+            line = line.replace("cm", "")
+            line = line.replace("\n", "").strip()
+            if line.upper().endswith("U"):
+                line = line[:-1]
+            return float(line)
+
+        text_start_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ&\\\"'")
+
+        with open(file, "r") as f:
+            for raw_line in f:
+                line = raw_line
+                if "*" in line:
+                    continue
+                if r"\IDY" in line:
+                    if "IDYNORM" in line:
+                        id_y = default_id_y
+                        continue
+                    try:
+                        id_y = _parse_unit_value(line, r"\IDY")
+                    except ValueError:
+                        pass
+                    continue
+                if r"\IDLENG" in line:
+                    try:
+                        id_len = _parse_unit_value(line, r"\IDLENG")
+                    except ValueError:
+                        pass
+                    continue
+                if r"\IDMULT" in line:
+                    rest = line.replace(r"\IDMULT", "", 1).lstrip()
+                    numbers = []
+                    in_range = True
+                    while rest and rest[0] not in text_start_chars:
+                        num = ""
+                        while rest and (rest[0].isdigit() or rest[0] == "."):
+                            num += rest[0]
+                            rest = rest[1:]
+                        if not num:
+                            break
+                        val = float(num)
+                        if xmin < val < xmax:
+                            numbers.append(val)
+                        else:
+                            in_range = False
+                        rest = rest.lstrip()
+                    if in_range and numbers:
+                        items.append({
+                            "kind": "mult",
+                            "x": numbers,
+                            "segments": self.__parse_wrplot_text(rest, default_color),
+                            "id_y": id_y,
+                            "id_len": id_len,
+                        })
+                    continue
+                if r"\IDENT" in line:
+                    rest = line.replace(r"\IDENT", "", 1).lstrip()
+                    num = ""
+                    while rest and (rest[0].isdigit() or rest[0] == "."):
+                        num += rest[0]
+                        rest = rest[1:]
+                    if not num:
+                        continue
+                    val = float(num)
+                    if not (xmin < val < xmax):
+                        continue
+                    rest = rest.lstrip()
+                    items.append({
+                        "kind": "ident",
+                        "x": val,
+                        "segments": self.__parse_wrplot_text(rest, default_color),
+                        "id_y": id_y,
+                        "id_len": id_len,
+                    })
+        return items
+
+    def plot_idents(self, file, id_xoff=0, id_y=1.05, id_len=0.05, id_fontsize=12,
+                    id_linesize=0.75, id_horizontal=False, color="black", bbox_alpha=0,
+                    color_line_from_text=False):
+        """
+        Read and plot line identifications from a WRPLOT-style file.
+
+        Preserves WRPLOT text notation (colors ``&0``–``&9``, sub/superscripts,
+        italics/bold, letter spacing, fonts, Greek ``#a#``, symbols) and avoids
+        overlapping labels by automatic x-offsets. File-local ``\\IDY`` and
+        ``\\IDLENG`` (with optional ``U`` for y-units) are honoured; kwargs are
+        the defaults.
+
+        Parameters
+        ----------
+        file : str
+            File containing the line identifications (e.g. ``id_O.dat``).
+        id_xoff : float
+            Global extra x-offset added to every label (data units).
+        id_y : float
+            Default y where identification marks start (overridden by ``\\IDY``).
+        id_len : float
+            Default mark length in y-units (overridden by ``\\IDLENG``).
+        id_fontsize : float
+            Font size of identification text.
+        id_linesize : float
+            Line width of the identification marks.
+        id_horizontal : bool
+            If True, write labels horizontally (WRPLOT ``\\IDHOR``); default vertical.
+        color : color
+            Default color for marks and text (WRPLOT color 1 / black). ``&n`` in
+            the label string recolors text segments; marks keep this color unless
+            ``color_line_from_text`` is True.
+        bbox_alpha : float
+            Opacity of a white text background (0 = none, 1 = opaque).
+        color_line_from_text : bool
+            If True, draw each identification mark in the color of the first
+            letter/segment of its label (from ``&n`` or ``color``). If False
+            (default), marks always use ``color``.
+
+        Notes
+        -----
+        The previous implementation is available as ``plot_idents_original``.
+        """
+        _ensure_plotting()
+
+        ax = plt.gca()
+        xmin, xmax = ax.get_xlim()
+        items = self.__parse_ident_file(
+            file, xmin, xmax, default_id_y=id_y, default_id_len=id_len,
+            default_color=color,
+        )
+        if not items:
+            return
+
+        def _anchor(it):
+            if it["kind"] == "ident":
+                return float(it["x"])
+            return 0.5 * (float(it["x"][0]) + float(it["x"][-1]))
+
+        def _mark_color(it):
+            if color_line_from_text and it["segments"]:
+                return it["segments"][0]["color"]
+            return color
+
+        # Place left-to-right so automatic spacing matches WRPLOT's default
+        order = sorted(range(len(items)), key=lambda i: _anchor(items[i]))
+        last_right = None
+        gap = None
+
+        for idx in order:
+            it = items[idx]
+            if not it["segments"]:
+                continue
+            anchor = _anchor(it)
+            text_y = it["id_y"] + it["id_len"] * 1.05
+            line_color = _mark_color(it)
+
+            # Measure native (unshifted) x-span at the wavelength anchor
+            native = self.__measure_wrplot_label_xspan(
+                ax, anchor + id_xoff, text_y, it["segments"],
+                fontsize=id_fontsize, horizontal=id_horizontal,
+            )
+            half = 0.5 * (native[1] - native[0])
+            if gap is None:
+                gap = max(0.15 * abs(native[1] - native[0]), 1e-6)
+
+            # Desired label centre; shift right if it would overlap the previous label
+            centre = anchor + id_xoff
+            if last_right is not None and centre - half < last_right + gap:
+                centre = last_right + gap + half
+            offs = centre - anchor
+
+            if centre >= xmax:
+                continue
+
+            # Draw mark + label at the resolved offset
+            if it["kind"] == "ident":
+                self.__plot_ident_mark(
+                    it["x"], offs, it["id_y"], it["id_len"], id_linesize, line_color,
+                )
+                box = self.__draw_wrplot_label(
+                    it["x"] + offs, text_y, it["segments"],
+                    fontsize=id_fontsize, horizontal=id_horizontal, bbox_alpha=bbox_alpha,
+                )
+            else:
+                _y_top, center = self.__plot_idmult_mark(
+                    it["x"], offs, it["id_y"], it["id_len"], id_linesize, line_color,
+                )
+                box = self.__draw_wrplot_label(
+                    center + offs, text_y, it["segments"],
+                    fontsize=id_fontsize, horizontal=id_horizontal, bbox_alpha=bbox_alpha,
+                )
+            last_right = box[1]
+
     def command_ismline_original(self, dataset, coldens, l0, fvalue, gamm,
                         atmass=None, vrad=0.0, temp=-273.15, vturb=0.0,
                         info=False):

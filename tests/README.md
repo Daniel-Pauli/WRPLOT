@@ -10,9 +10,10 @@ WRPLOT. Tolerance for flux differences vs WRPLOT: **1e-4**.
 | `test.plot` | WRPLOT script that writes reference spectra into `ref/` |
 | `run_wrplot_refs.sh` | Runs `wrplot test.plot +` to regenerate `ref/` |
 | `data/` | Input continua used by WRPLOT and Python |
-| `ref/` | WRPLOT `COMMAND WRITE` tables (ground truth) |
+| `ref/` | WRPLOT `COMMAND WRITE` tables + `id_O.dat` (idents fixture) |
 | `output/` | QC spectrum plots (`.png`) and timing tables (`.txt`) |
-| `run_all.py` | Unit tests + QC output generation |
+| `run_all.py` | Unit tests + QC output generation (incl. idents figures) |
+| `test_idents.py` | WRPLOT-style `plot_idents` (colors, half-space gap vs geometry) |
 
 ## 1. Generate WRPLOT references
 
@@ -47,3 +48,7 @@ From the repo root (needs the same Python env as `wrplot.py`, e.g. anaconda):
   `command_reddening_original`. QC plots: `output/reddening_comparison.png`,
   `output/reddening_rv_comparison.png`, `output/reddening_slow_fast.png`,
   plus `output/reddening_timing.txt`.
+- IDENTS (`plot_idents`) uses `ref/id_O.dat`. A full `run_all.py` or
+  `run_all.py --plots-only` regenerates `output/idents_smoke.png`,
+  `output/idents_geometry_matrix.png`, and `output/idents_*.png` (one per
+  figure size / ylim). `--unit-only` skips those figure updates.
