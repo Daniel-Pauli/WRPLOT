@@ -7,13 +7,198 @@
 import numpy as np
 from scipy import interpolate
 from scipy.signal import fftconvolve
-import matplotlib
-import matplotlib.pyplot as plt
-#!pip install svgpath2mpl matplotlib
-from svgpath2mpl import parse_path
-from astropy.convolution import Gaussian1DKernel, Box1DKernel, convolve
-from tqdm import tqdm
 from numba import njit
+
+# Matplotlib / svgpath2mpl are heavy; load on first plot/figure use.
+matplotlib = None
+plt = None
+_parse_path = None
+
+
+def _ensure_plotting():
+    """Import matplotlib and svgpath2mpl once, on first plotting call."""
+    global matplotlib, plt, _parse_path
+    if plt is not None:
+        return
+    import matplotlib as _mpl
+    import matplotlib.pyplot as _plt
+    from svgpath2mpl import parse_path as _pp
+
+    matplotlib = _mpl
+    plt = _plt
+    _parse_path = _pp
+
+
+def _is_monotonic_ascending(x):
+    """True if x is sorted non-decreasing (O(n), no full sort)."""
+    x = np.asarray(x)
+    if x.size < 2:
+        return True
+    return not np.any(x[1:] < x[:-1])
+
+
+# ---------------------------------------------------------------------------
+# Module-level constants (avoid rebuilding on every command_* call)
+# ---------------------------------------------------------------------------
+
+# H Lyman line atomic data (shared by command_hlymana / _original)
+_HLY_XLAM0 = np.float64([
+    1215.671, 1025.722, 972.5366, 949.74297,
+    937.80344, 930.74824, 926.22571, 923.15037,
+    920.96313, 919.35146, 918.12939, 917.18061,
+    916.42917, 915.82388, 915.32904, 914.91936,
+    914.57629, 914.28622, 914.0386, 913.82569,
+    913.64126, 913.48036, 913.33922, 913.2147,
+    913.10431, 913.00597, 912.918, 912.83898,
+    912.76775, 912.70331, 912.64482,
+])
+_HLY_C0 = np.float64([
+    7.056E-11, 4.428E-11, 3.788E-11, 3.522E-11,
+    3.381E-11, 3.298E-11, 3.243E-11, 3.204E-11,
+    3.177E-11, 3.156E-11, 3.141E-11, 3.129E-11,
+    3.12E-11, 3.112E-11, 3.106E-11, 3.101E-11,
+    3.097E-11, 3.093E-11, 3.09E-11, 3.087E-11,
+    3.085E-11, 3.083E-11, 3.081E-11, 3.079E-11,
+    3.078E-11, 3.077E-11, 3.076E-11, 3.075E-11,
+    3.074E-11, 3.073E-11, 3.072E-11,
+])
+_HLY_C1 = np.float64([
+    1.657E+09, 3.575E+10, 2.402E+11, 9.867E+11,
+    3.059E+12, 7.871E+12, 1.773E+13, 3.628E+13,
+    6.036E+13, 9.76E+13, 1.427E+14, 1.941E+14,
+    2.505E+14, 3.106E+14, 3.734E+14, 4.381E+14,
+    5.042E+14, 5.712E+14, 6.387E+14, 7.064E+14,
+    7.743E+14, 8.421E+14, 9.098E+14, 9.773E+14,
+    1.044E+15, 1.111E+15, 1.178E+15, 1.244E+15,
+    1.31E+15, 1.376E+15, 1.441E+15,
+])
+_HLY_FVALUE = np.float64([
+    4.1620E-01, 7.9100E-02, 2.8990E-02, 1.3940E-02,
+    7.7990E-03, 4.8140E-03, 3.1830E-03, 2.2160E-03,
+    1.6050E-03, 1.2010E-03, 9.2140E-04, 7.2270E-04,
+    5.7740E-04, 4.6860E-04, 3.8560E-04, 3.2110E-04,
+    2.7030E-04, 2.2960E-04, 1.9670E-04, 1.6980E-04,
+    1.4760E-04, 1.2910E-04, 1.1360E-04, 1.0050E-04,
+    8.9290E-05, 7.9700E-05, 7.1450E-05, 6.4300E-05,
+    5.8070E-05, 5.2610E-05, 4.7830E-05,
+])
+_HLY_GAMM = np.float64([
+    6.26500E+08, 1.89700E+08, 8.12700E+07, 4.20400E+07,
+    2.45000E+07, 1.4043E+07, 9.3788E+06, 6.5742E+06,
+    4.7849E+06, 3.5931E+06, 2.7643E+06, 2.1728E+06,
+    1.7388E+06, 1.4131E+06, 1.1641E+06, 9.7030E+05,
+    8.1739E+05, 6.9477E+05, 5.9556E+05, 5.1437E+05,
+    4.4730E+05, 3.9138E+05, 3.4449E+05, 3.0485E+05,
+    2.7091E+05, 2.4188E+05, 2.1689E+05, 1.9522E+05,
+    1.7632E+05, 1.5978E+05, 1.4527E+05,
+])
+
+# Fitzpatrick optical–IR spline knots (fixed x; y depends on R_V)
+_FITZ_XOPIR = np.array(
+    [0.0, 0.377358, 0.819672, 1.666667, 1.828153, 2.141328, 2.433090, 3.703704, 3.846154],
+    dtype=np.float64,
+)
+
+_SEATON_FTAB = np.array(
+    [1.36, 1.44, 1.84, 2.04, 2.24, 2.44, 2.66, 2.88, 3.14, 3.36, 3.56,
+     3.77, 3.96, 4.15, 4.26, 4.40, 4.52, 4.64],
+    dtype=np.float64,
+)
+_SEATON_ZTAB = np.array(
+    [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2,
+     2.3, 2.4, 2.5, 2.6, 2.7],
+    dtype=np.float64,
+)
+_MONETI_FTAB = np.array(
+    [0.4097, 0.2804, 0.1736, 0.1108, 0.0964, 0.0923, 0.0715,
+     0.0530, 0.0510, 0.0492, 0.0477, 0.0464, 0.0452, 0.0441,
+     0.0431, 0.0463, 0.0628, 0.0989, 0.1454, 0.1431, 0.1250,
+     0.1023, 0.0835, 0.0721, 0.0634, 0.0569, 0.0545, 0.0553,
+     0.0561, 0.0573, 0.0589, 0.0612, 0.0643, 0.0677, 0.0707,
+     0.0726, 0.0730, 0.0721, 0.0704, 0.0683, 0.0663, 0.0644,
+     0.0626, 0.0610, 0.0586, 0.0561, 0.0537, 0.0515],
+    dtype=np.float64,
+)
+_MONETI_XTAB = np.array(
+    [4.000, 4.097, 4.217, 4.342, 4.398, 4.477, 4.544, 4.602,
+     4.653, 4.699, 4.740, 4.778, 4.813, 4.845, 4.875, 4.903,
+     4.929, 4.954, 4.978, 5.000, 5.021, 5.041, 5.061, 5.079,
+     5.097, 5.114, 5.130, 5.146, 5.161, 5.176, 5.190, 5.204,
+     5.217, 5.230, 5.243, 5.255, 5.267, 5.279, 5.290, 5.301,
+     5.312, 5.322, 5.332, 5.342, 5.352, 5.362, 5.371, 5.380],
+    dtype=np.float64,
+)
+_EXTINCT_EX = np.array(
+    [0.030, 0.100, 0.284, 0.400, 0.532, 0.707, 0.867, 1.303,
+     1.840, 2.471, 3.210, 4.038, 7.111, 8.331, 10.00],
+    dtype=np.float64,
+)
+_EXTINCT_CX0 = np.array(
+    [17.3, 34.6, 78.1, 71.4, 95.5, 308.9, 120.6,
+     141.3, 202.7, 342.7, 352.2, 433.9, 629.0, 701.2],
+    dtype=np.float64,
+)
+_EXTINCT_CX1 = np.array(
+    [608.1, 267.9, 18.8, 66.8, 145.8, -380.6, 169.3,
+     146.8, 104.7, 18.7, 18.7, -2.4, 30.9, 25.2],
+    dtype=np.float64,
+)
+_EXTINCT_CX2 = np.array(
+    [-2150., -476.1, 4.3, -51.4, -61.1, 294.0, -47.7,
+     -31.5, -17.0, 0.0, 0.0, 0.75, 0.0, 0.0],
+    dtype=np.float64,
+)
+_CARDELLI_CTAB3 = np.array(
+    [1., 0.17699, -0.50447, -0.02427, 0.72085, 0.01979, -0.77530, 0.32999],
+    dtype=np.float64,
+)
+_CARDELLI_CTAB4 = np.array(
+    [0., 1.41338, 2.28305, 1.07233, -5.38434, -0.62251, 5.30260, -2.09002],
+    dtype=np.float64,
+)
+_CARDELLI_CTAB9 = np.array([-1.073, -0.628, 0.137, -0.070], dtype=np.float64)
+_CARDELLI_CTAB10 = np.array([13.670, 4.257, -0.420, 0.374], dtype=np.float64)
+
+_BOMB_SVG = (
+    "m 256.762,183.29025 c -6.522,6.522 -17.087,6.522 -23.609,0 "
+    "-14.733,-14.733 -34.294,-22.847 -55.066,-22.847 -20.772,0 -40.331,8.114 "
+    "-55.066,22.847 -6.521,6.521 -17.087,6.521 -23.609,0 -6.521,-6.516 "
+    "-6.521,-17.092 0,-23.609 21.038,-21.043 48.978,-32.63 78.674,-32.63 "
+    "29.696,0 57.636,11.587 78.674,32.63 6.523,6.517 6.523,17.093 0.002,23.609 z "
+    "m 250.34799,239.392 c -3.261,3.261 -7.533,4.892 -11.805,4.892 -4.272,0 "
+    "-8.544,-1.631 -11.804,-4.892 l -11.13,-11.13 c -6.521,-6.521 -6.521,-17.092 "
+    "0,-23.609 6.521,-6.521 17.097,-6.521 23.609,0 l 11.13,11.13 c 6.521,6.521 "
+    "6.521,17.092 0,23.609 z m -66.784,-66.783 c -6.521,6.522 -17.097,6.522 "
+    "-23.608,0 l -11.12999,-11.13 c -6.521,-6.521 -6.521,-17.092 0,-23.609 "
+    "3.261,-3.261 7.53299,-4.892 11.80399,-4.892 4.271,0 8.544,1.631 11.804,4.892 "
+    "l 11.13,11.13 c 6.521,6.522 6.521,17.092 0,23.609 z m 66.781,-11.13 "
+    "-11.129,11.13 c -6.511,6.521 -17.087,6.521 -23.609,0 -6.521,-6.516 "
+    "-6.521,-17.087 0,-23.609 l 11.13,-11.13 c 3.261,-3.261 7.533,-4.892 "
+    "11.804,-4.892 4.271,0 8.544,1.631 11.804,4.892 6.522,6.516 6.522,17.087 "
+    "0,23.609 z m -65.449,62.717 -23.609,23.609 c -19.52699,19.538 "
+    "-51.31599,19.527 -70.83199,0 l -7.869,-7.869 -23.614,23.614 c -6.521,6.521 "
+    "-17.087,6.521 -23.609,0 l -44.575,-44.575 c -21.699,9.182 -45.244,14.01 "
+    "-69.55,14.01 -47.625,0 -92.343,-18.494 -125.924,-52.076 -69.435,-69.435 "
+    "-69.435,-182.419 0,-251.853 33.582,-33.582 78.299,-52.076 125.924,-52.076 "
+    "47.625,0 92.348,18.494 125.93,52.076 33.582,33.582 52.076,78.299 "
+    "52.076,125.924 0,24.306 -4.828,47.851 -14.01,69.551 l 44.575,44.575 c "
+    "6.521,6.516 6.521,17.092 0,23.609 l -23.614,23.614 7.869,7.869 c 6.506,6.506 "
+    "17.097,6.516 23.614,0 l 23.60899,-23.609 c 3.261,-3.261 7.533,-4.892 "
+    "11.804,-4.892 4.271,0 8.544,1.631 11.804,4.892 6.522,6.515 6.522,17.092 "
+    "10e-4,23.607 z M 280.321,135.95425 c -27.277,-27.272 -63.614,-42.293 "
+    "-102.321,-42.293 -38.707,0 -75.038,15.022 -102.315,42.293 -56.414,56.418 "
+    "-56.414,148.217 0,204.636 27.277,27.272 63.608,42.293 102.315,42.293 "
+    "22.581,0 44.351,-5.121 63.991,-14.796 0.474,-0.305 0.957,-0.599 1.465,-0.856 "
+    "11.984,-6.082 22.928,-13.665 32.612,-22.57 0.13,-0.12 0.259,-0.242 "
+    "0.388,-0.362 1.31,-1.213 2.6,-2.448 3.863,-3.71 1.262,-1.263 2.495,-2.553 "
+    "3.71,-3.863 0.12,-0.129 0.242,-0.259 0.362,-0.39 8.90499,-9.683 "
+    "16.489,-20.628 22.57,-32.612 0.257,-0.509 0.551,-0.991 0.856,-1.465 "
+    "9.675,-19.64 14.796,-41.411 14.796,-63.991 0.002,-38.706 -15.02,-75.037 "
+    "-42.292,-102.314 z m 45.008,202.416 c -5.468,8.023 -11.62,15.652 "
+    "-18.444,22.8 -0.973,1.021 -1.958,2.031 -2.956,3.029 -0.998,0.997 "
+    "-2.008,1.982 -3.029,2.956 -7.148,6.823 -14.777,12.976 -22.8,18.444 "
+    "l 25.828,25.828 47.22899,-47.229 z"
+)
 
 
 @njit(cache=True)
@@ -33,25 +218,41 @@ def _local_spacing(x, k, n):
 
 
 @njit(cache=True)
+def _precompute_spacing(x):
+    n = len(x)
+    spacing = np.empty(n)
+    for k in range(n):
+        spacing[k] = _local_spacing(x, k, n)
+    return spacing
+
+
+@njit(cache=True)
 def _convol_gauss_kernel(x, y, sigma, half_width):
     """
     Discrete Gaussian convolution on an irregular but sorted wavelength grid.
 
     Each sample is weighted by the kernel value times local spacing (WRPLOT
     CONVADD), so dense clusters (e.g. after ISMLINE) are not over-weighted.
+    Sliding lo/hi windows avoid per-point searchsorted on sorted grids.
     """
     n = len(x)
     out = np.empty(n)
+    spacing = _precompute_spacing(x)
+    lo = 0
+    hi = 0
     for i in range(n):
         mu = x[i]
-        # Match command_cut strict inequalities: lo < x < hi
-        lo = np.searchsorted(x, mu - half_width, side="right")
-        hi = np.searchsorted(x, mu + half_width, side="left")
+        left = mu - half_width
+        right = mu + half_width
+        while lo < n and x[lo] <= left:
+            lo += 1
+        while hi < n and x[hi] < right:
+            hi += 1
         s = 0.0
         wsum = 0.0
         for j in range(lo, hi):
             u = (x[j] - mu) / sigma
-            w = np.exp(-0.5 * u * u) * _local_spacing(x, j, n)
+            w = np.exp(-0.5 * u * u) * spacing[j]
             s += y[j] * w
             wsum += w
         out[i] = s / wsum if wsum != 0.0 else 0.0
@@ -67,14 +268,21 @@ def _convol_box_kernel(x, y, width):
     """
     n = len(x)
     out = np.empty(n)
+    spacing = _precompute_spacing(x)
+    lo = 0
+    hi = 0
     for i in range(n):
         mu = x[i]
-        lo = np.searchsorted(x, mu - width, side="right")
-        hi = np.searchsorted(x, mu + width, side="left")
+        left = mu - width
+        right = mu + width
+        while lo < n and x[lo] <= left:
+            lo += 1
+        while hi < n and x[hi] < right:
+            hi += 1
         s = 0.0
         wsum = 0.0
         for j in range(lo, hi):
-            w = _local_spacing(x, j, n)
+            w = spacing[j]
             s += y[j] * w
             wsum += w
         out[i] = s / wsum if wsum != 0.0 else 0.0
@@ -93,11 +301,18 @@ def _convol_rot_kernel(x, y, d_angstrom, beta):
     """
     n = len(x)
     out = np.empty(n)
+    spacing = _precompute_spacing(x)
     twobypi = 0.6366197723675814  # 2/π
+    lo = 0
+    hi = 0
     for i in range(n):
         mu = x[i]
-        lo = np.searchsorted(x, mu - d_angstrom, side="right")
-        hi = np.searchsorted(x, mu + d_angstrom, side="left")
+        left = mu - d_angstrom
+        right = mu + d_angstrom
+        while lo < n and x[lo] <= left:
+            lo += 1
+        while hi < n and x[hi] < right:
+            hi += 1
         s = 0.0
         wsum = 0.0
         for j in range(lo, hi):
@@ -107,7 +322,7 @@ def _convol_rot_kernel(x, y, d_angstrom, beta):
                 continue
             xa2 = xa * xa
             g = twobypi * np.sqrt(1.0 - xa2) + beta * 0.5 * (1.0 - xa2)
-            w = g * _local_spacing(x, j, n)
+            w = g * spacing[j]
             s += y[j] * w
             wsum += w
         out[i] = s / wsum if wsum != 0.0 else 0.0
@@ -125,15 +340,22 @@ def _convol_rot_vsini_kernel(x, y, vsini_kms, beta):
     """
     n = len(x)
     out = np.empty(n)
+    spacing = _precompute_spacing(x)
     vsini = vsini_kms / 299792.458
+    lo = 0
+    hi = 0
     for i in range(n):
         mu = x[i]
         half = vsini * mu
         if half <= 0.0:
             out[i] = y[i]
             continue
-        lo = np.searchsorted(x, mu - half, side="right")
-        hi = np.searchsorted(x, mu + half, side="left")
+        left = mu - half
+        right = mu + half
+        while lo < n and x[lo] <= left:
+            lo += 1
+        while hi < n and x[hi] < right:
+            hi += 1
         c1 = 2.0 * (1.0 - beta) / (np.pi * half * (1.0 - beta / 3.0))
         c2 = beta / (2.0 * half * (1.0 - beta / 3.0))
         s = 0.0
@@ -142,7 +364,7 @@ def _convol_rot_vsini_kernel(x, y, vsini_kms, beta):
             z2 = ((mu - x[j]) / half) ** 2
             if z2 >= 1.0:
                 continue
-            w = (c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)) * _local_spacing(x, j, n)
+            w = (c1 * np.sqrt(1.0 - z2) + c2 * (1.0 - z2)) * spacing[j]
             s += y[j] * w
             wsum += w
         out[i] = s / wsum if wsum != 0.0 else 0.0
@@ -530,12 +752,11 @@ def _polynom_njit(x, coeff):
 def _fspline_njit(xx, y, x):
     """Cubic FSPLINE (same as wrplotter.__spline / Fortran FSPLINE)."""
     n = len(x)
-    L = 1
-    while L < n:
-        if (xx - x[L - 1]) * (xx - x[L]) <= 0.0:
-            break
-        L += 1
-    if L >= n:
+    # Knots are sorted ascending; binary search for the bracketing interval.
+    L = np.searchsorted(x, xx)
+    if L < 1:
+        L = 1
+    elif L >= n:
         L = n - 1
     d1 = 1.0 / (x[L] - x[L - 1])
     d2 = d1 * d1
@@ -564,34 +785,95 @@ def _fspline_njit(xx, y, x):
 def _expand_largest_gaps_njit(x_in, y_in, n_target):
     """
     WRPLOT EXTINCT expansion: repeatedly insert the midpoint of the largest
-    |Δx| gap (linear Y) until len == n_target. Same rule as the slow path,
-    but without per-insert Python/numpy reallocations.
+    |Δx| gap (linear Y) until len == n_target. Same rule as the slow path.
+
+    Uses a linked list of points so each insert is O(1) instead of an O(n)
+    array shift. Finding the largest gap remains O(n) per insert.
     """
     n0 = len(x_in)
     if n0 >= n_target or n0 < 2:
         return x_in.copy(), y_in.copy()
+
     x = np.empty(n_target, dtype=np.float64)
     y = np.empty(n_target, dtype=np.float64)
-    x[:n0] = x_in
-    y[:n0] = y_in
+    nxt = np.empty(n_target, dtype=np.int64)
+    for i in range(n0):
+        x[i] = x_in[i]
+        y[i] = y_in[i]
+        nxt[i] = i + 1 if i + 1 < n0 else -1
+
     n = n0
+    head = 0
+    free = n0
     while n < n_target:
+        i = head
+        i_best = head
         d1 = -1.0
-        i_best = 0
-        for i in range(n - 1):
-            d = abs(x[i + 1] - x[i])
+        while nxt[i] >= 0:
+            j = nxt[i]
+            d = abs(x[j] - x[i])
             if d > d1:
                 d1 = d
                 i_best = i
-        xmid = 0.5 * (x[i_best] + x[i_best + 1])
-        ymid = 0.5 * (y[i_best] + y[i_best + 1])
-        for j in range(n - 1, i_best, -1):
-            x[j + 1] = x[j]
-            y[j + 1] = y[j]
-        x[i_best + 1] = xmid
-        y[i_best + 1] = ymid
+            i = j
+        j = nxt[i_best]
+        k = free
+        free += 1
+        x[k] = 0.5 * (x[i_best] + x[j])
+        y[k] = 0.5 * (y[i_best] + y[j])
+        nxt[i_best] = k
+        nxt[k] = j
         n += 1
-    return x, y
+
+    x_out = np.empty(n_target, dtype=np.float64)
+    y_out = np.empty(n_target, dtype=np.float64)
+    i = head
+    for t in range(n_target):
+        x_out[t] = x[i]
+        y_out[t] = y[i]
+        i = nxt[i]
+    return x_out, y_out
+
+
+def _fitz_yopir_for_rv(rf):
+    """Fitzpatrick optical–IR spline Y knots for a given R_V (= rf)."""
+    fitz_c2 = -0.824 + 4.717 / rf
+    fitz_c1 = 2.030 - 3.007 * fitz_c2
+    return np.array([
+        0.0,
+        0.26469 * rf / 3.1,
+        0.82925 * rf / 3.1,
+        -4.22809e-01 + 1.00270 * rf + 2.13572e-04 * rf * rf,
+        -5.13540e-02 + 1.00216 * rf - 7.35778e-05 * rf * rf,
+        7.00127e-01 + 1.00184 * rf - 3.32598e-05 * rf * rf,
+        (
+            1.19456
+            + 1.01707 * rf
+            - 5.46959e-03 * rf * rf
+            + 7.97809e-04 * rf * rf * rf
+            - 4.45636e-05 * rf * rf * rf * rf
+        ),
+        (
+            fitz_c1
+            + fitz_c2 * 3.703704
+            + (
+                3.23
+                * 3.703704 ** 2
+                / ((3.703704 ** 2 - 4.596 ** 2) ** 2 + (3.703704 * 0.99) ** 2)
+            )
+            + rf
+        ),
+        (
+            fitz_c1
+            + fitz_c2 * 3.846154
+            + (
+                3.23
+                * 3.846154 ** 2
+                / ((3.846154 ** 2 - 4.596 ** 2) ** 2 + (3.846154 * 0.99) ** 2)
+            )
+            + rf
+        ),
+    ], dtype=np.float64)
 
 
 @njit(cache=True)
@@ -606,6 +888,7 @@ def _reddening_kernel(
     RLMC,
     RSMCBAR,
     fitz_yopir,
+    fitz_xopir,
     seaton_ftab,
     seaton_ztab,
     moneti_ftab,
@@ -622,10 +905,22 @@ def _reddening_kernel(
     """
     Apply EXTINCT-style reddening in-place on logλ / log(flux) arrays.
     Returns modified ylog.
+
+    ``fitz_yopir`` / ``fitz_xopir`` must already match the R_V used for the
+    Fitzpatrick / SMC / SMC_BAR optical–IR bridge (built once by the caller).
     """
     n = len(xlog)
     out = ylog.copy()
     coldens_fac = ebv * 3.8e21 * 0.4342944
+
+    # Precompute Fitzpatrick UV continuum coeffs for the active R_V of this law
+    rf_uv = Rfitz
+    if law == 4:
+        rf_uv = RSMC
+    elif law == 5:
+        rf_uv = RSMCBAR
+    fitz_c2 = -0.824 + 4.717 / rf_uv
+    fitz_c1 = 2.030 - 3.007 * fitz_c2
 
     for i in range(n):
         xl = xlog[i]
@@ -699,13 +994,6 @@ def _reddening_kernel(
             or (law == 5 and (z <= 3.375 and z > 0.2))
         ):
             # Fitzpatrick (also SMC / SMC_BAR in the optical–IR bridge)
-            rf = Rfitz
-            if law == 4:
-                rf = RSMC
-            elif law == 5:
-                rf = RSMCBAR
-            fitz_c2 = -0.824 + 4.717 / rf
-            fitz_c1 = 2.030 - 3.007 * fitz_c2
             if z >= 3.703704:
                 yuv = (
                     fitz_c1
@@ -715,79 +1003,9 @@ def _reddening_kernel(
                 if z > 5.9:
                     dz = z - 5.9
                     yuv = yuv + 0.41 * (0.5392 * dz * dz + 0.05644 * dz * dz * dz)
-                f = yuv + rf
+                f = yuv + rf_uv
             else:
-                # yopir was built for the call's default Rfitz; rebuild if SMC/SMC_BAR
-                if law == 4 or law == 5:
-                    yopir = np.empty(9, dtype=np.float64)
-                    yopir[0] = 0.0
-                    yopir[1] = 0.26469 * rf / 3.1
-                    yopir[2] = 0.82925 * rf / 3.1
-                    yopir[3] = -4.22809e-01 + 1.00270 * rf + 2.13572e-04 * rf * rf
-                    yopir[4] = -5.13540e-02 + 1.00216 * rf - 7.35778e-05 * rf * rf
-                    yopir[5] = 7.00127e-01 + 1.00184 * rf - 3.32598e-05 * rf * rf
-                    yopir[6] = (
-                        1.19456
-                        + 1.01707 * rf
-                        - 5.46959e-03 * rf * rf
-                        + 7.97809e-04 * rf * rf * rf
-                        - 4.45636e-05 * rf * rf * rf * rf
-                    )
-                    yopir[7] = (
-                        fitz_c1
-                        + fitz_c2 * 3.703704
-                        + (
-                            3.23
-                            * 3.703704 ** 2
-                            / (
-                                (3.703704 ** 2 - 4.596 ** 2) ** 2
-                                + (3.703704 * 0.99) ** 2
-                            )
-                        )
-                        + rf
-                    )
-                    yopir[8] = (
-                        fitz_c1
-                        + fitz_c2 * 3.846154
-                        + (
-                            3.23
-                            * 3.846154 ** 2
-                            / (
-                                (3.846154 ** 2 - 4.596 ** 2) ** 2
-                                + (3.846154 * 0.99) ** 2
-                            )
-                        )
-                        + rf
-                    )
-                    xopir = np.array(
-                        [
-                            0.0,
-                            0.377358,
-                            0.819672,
-                            1.666667,
-                            1.828153,
-                            2.141328,
-                            2.433090,
-                            3.703704,
-                            3.846154,
-                        ]
-                    )
-                    f = _fspline_njit(z, yopir, xopir)
-                else:
-                    xopir = np.array(
-                        [
-                            0.0,
-                            0.377358,
-                            0.819672,
-                            1.666667,
-                            1.828153,
-                            2.141328,
-                            2.433090,
-                            3.703704,
-                            3.846154,
-                        ]
-                    )
-                    f = _fspline_njit(z, fitz_yopir, xopir)
+                f = _fspline_njit(z, fitz_yopir, fitz_xopir)
 
         elif law == 3 and z >= 1.83:
             if z <= 2.75:
@@ -851,6 +1069,35 @@ def _reddening_kernel(
     return out
 
 
+def warmup_kernels():
+    """
+    Eagerly compile/cache numba kernels used by the fast command_* paths.
+
+    Call once at process start (e.g. in tests) to avoid paying JIT cost on the
+    first science call.
+    """
+    x = np.linspace(1000.0, 1100.0, 64)
+    y = np.ones(64)
+    _convol_gauss_kernel(x, y, 1.0, 4.5)
+    _convol_box_kernel(x, y, 2.0)
+    _convol_rot_kernel(x, y, 2.0, 0.0)
+    _convol_rot_vsini_kernel(x, y, 50.0, 0.0)
+    _voigth_njit(0.1, 0.0)
+    _ismline_apply_voigt(x, y.copy(), 1050.0, 0.1, 1e-3, -1e13, 1e10)
+    _ismline_apply_lorentz(x, y.copy(), 1050.0, 1e-11, 1e9, -1e13)
+    _fspline_njit(1.5, _SEATON_FTAB, _SEATON_ZTAB)
+    xg = np.linspace(3.0, 4.0, 50)
+    yg = np.zeros(50)
+    _expand_largest_gaps_njit(xg, yg, 80)
+    _reddening_kernel(
+        xg, yg, 0.1, 0, 3.1, 3.1, 2.7, 3.2, 2.74,
+        _fitz_yopir_for_rv(3.1), _FITZ_XOPIR,
+        _SEATON_FTAB, _SEATON_ZTAB, _MONETI_FTAB, _MONETI_XTAB,
+        _EXTINCT_EX, _EXTINCT_CX0, _EXTINCT_CX1, _EXTINCT_CX2,
+        _CARDELLI_CTAB3, _CARDELLI_CTAB4, _CARDELLI_CTAB9, _CARDELLI_CTAB10,
+    )
+
+
 class wrplotter:
         
     def __init__(self):
@@ -867,11 +1114,20 @@ class wrplotter:
                        'greenyellow', #8
                        'dodgerblue'   #9
                       ]
+        # Symbol table (incl. bomb SVG) is built lazily on first plot use
+        self._symbols = None
 
-        #add symbols of WR
-        bomb_symbol = parse_path("""m 256.762,183.29025 c -6.522,6.522 -17.087,6.522 -23.609,0 -14.733,-14.733 -34.294,-22.847 -55.066,-22.847 -20.772,0 -40.331,8.114 -55.066,22.847 -6.521,6.521 -17.087,6.521 -23.609,0 -6.521,-6.516 -6.521,-17.092 0,-23.609 21.038,-21.043 48.978,-32.63 78.674,-32.63 29.696,0 57.636,11.587 78.674,32.63 6.523,6.517 6.523,17.093 0.002,23.609 z m 250.34799,239.392 c -3.261,3.261 -7.533,4.892 -11.805,4.892 -4.272,0 -8.544,-1.631 -11.804,-4.892 l -11.13,-11.13 c -6.521,-6.521 -6.521,-17.092 0,-23.609 6.521,-6.521 17.097,-6.521 23.609,0 l 11.13,11.13 c 6.521,6.521 6.521,17.092 0,23.609 z m -66.784,-66.783 c -6.521,6.522 -17.097,6.522 -23.608,0 l -11.12999,-11.13 c -6.521,-6.521 -6.521,-17.092 0,-23.609 3.261,-3.261 7.53299,-4.892 11.80399,-4.892 4.271,0 8.544,1.631 11.804,4.892 l 11.13,11.13 c 6.521,6.522 6.521,17.092 0,23.609 z m 66.781,-11.13 -11.129,11.13 c -6.511,6.521 -17.087,6.521 -23.609,0 -6.521,-6.516 -6.521,-17.087 0,-23.609 l 11.13,-11.13 c 3.261,-3.261 7.533,-4.892 11.804,-4.892 4.271,0 8.544,1.631 11.804,4.892 6.522,6.516 6.522,17.087 0,23.609 z m -65.449,62.717 -23.609,23.609 c -19.52699,19.538 -51.31599,19.527 -70.83199,0 l -7.869,-7.869 -23.614,23.614 c -6.521,6.521 -17.087,6.521 -23.609,0 l -44.575,-44.575 c -21.699,9.182 -45.244,14.01 -69.55,14.01 -47.625,0 -92.343,-18.494 -125.924,-52.076 -69.435,-69.435 -69.435,-182.419 0,-251.853 33.582,-33.582 78.299,-52.076 125.924,-52.076 47.625,0 92.348,18.494 125.93,52.076 33.582,33.582 52.076,78.299 52.076,125.924 0,24.306 -4.828,47.851 -14.01,69.551 l 44.575,44.575 c 6.521,6.516 6.521,17.092 0,23.609 l -23.614,23.614 7.869,7.869 c 6.506,6.506 17.097,6.516 23.614,0 l 23.60899,-23.609 c 3.261,-3.261 7.533,-4.892 11.804,-4.892 4.271,0 8.544,1.631 11.804,4.892 6.522,6.515 6.522,17.092 10e-4,23.607 z M 280.321,135.95425 c -27.277,-27.272 -63.614,-42.293 -102.321,-42.293 -38.707,0 -75.038,15.022 -102.315,42.293 -56.414,56.418 -56.414,148.217 0,204.636 27.277,27.272 63.608,42.293 102.315,42.293 22.581,0 44.351,-5.121 63.991,-14.796 0.474,-0.305 0.957,-0.599 1.465,-0.856 11.984,-6.082 22.928,-13.665 32.612,-22.57 0.13,-0.12 0.259,-0.242 0.388,-0.362 1.31,-1.213 2.6,-2.448 3.863,-3.71 1.262,-1.263 2.495,-2.553 3.71,-3.863 0.12,-0.129 0.242,-0.259 0.362,-0.39 8.90499,-9.683 16.489,-20.628 22.57,-32.612 0.257,-0.509 0.551,-0.991 0.856,-1.465 9.675,-19.64 14.796,-41.411 14.796,-63.991 0.002,-38.706 -15.02,-75.037 -42.292,-102.314 z m 45.008,202.416 c -5.468,8.023 -11.62,15.652 -18.444,22.8 -0.973,1.021 -1.958,2.031 -2.956,3.029 -0.998,0.997 -2.008,1.982 -3.029,2.956 -7.148,6.823 -14.777,12.976 -22.8,18.444 l 25.828,25.828 47.22899,-47.229 z""")
+    @property
+    def symbols(self):
+        if self._symbols is None:
+            self._symbols = self._build_symbols()
+        return self._symbols
+
+    def _build_symbols(self):
+        _ensure_plotting()
+        bomb_symbol = _parse_path(_BOMB_SVG)
         bomb_symbol.vertices -= bomb_symbol.vertices.mean(axis=0)
-        self.symbols = [['',''],                                                             #0  nothing
+        return [['',''],                                                             #0  nothing
                         ['','+'],                                                            #1  cross
                         ['',r'$*$'],                                                         #2  asterisk
                         ['','^'],                                                            #3  triangle
@@ -985,6 +1241,7 @@ class wrplotter:
         `~matplotlib.rcParams` defines the default values, which can be modified
         in the matplotlibrc file.
         """
+        _ensure_plotting()
         fig = plt.figure(figsize=figsize,**kwargs)
         plt.rc('font', family='Helvetica')
         plt.rcParams["font.family"] = "sans-serif"#'serif'
@@ -1046,6 +1303,7 @@ class wrplotter:
         -----
         This function is not well tested and has to be handeled with care.
         """
+        _ensure_plotting()
         if xrange == None or yrange == None:
             return plt.subplot(111)
         #print(xrange.shape())
@@ -1116,6 +1374,7 @@ class wrplotter:
         -----
         This function is not well tested and has to be handeled with care.
         """
+        _ensure_plotting()
         # some standard definitions
         markeredgecolor = "black"
         markersize=14*abs(SIZE)
@@ -1460,6 +1719,7 @@ class wrplotter:
         plt.sca(tmp)
             
     def show(self):
+        _ensure_plotting()
         plt.show()
         return
     
@@ -1723,7 +1983,8 @@ class wrplotter:
         -----
         The Box function is NOT normalized to 1.
         """
-        return np.array([1 if  (a >= mu-width) & (a <= mu+width) else 0 for a in x])
+        x = np.asarray(x)
+        return ((x >= mu - width) & (x <= mu + width)).astype(float)
     
     def rot(self, x, mu=0, d_angstrom=0, beta=0):
         """
@@ -1765,7 +2026,7 @@ class wrplotter:
         Convolution — pure-Python 1:1 port of WRPLOT CONVEX + CONVADD.
 
         Sample weights follow CONVADD: kernel(Δλ) × local spacing |Δx|.
-        Use ``command_convol`` for the numba-accelerated twin.
+        **Validation / reference only** — prefer ``command_convol`` in production.
 
         Parameters
         ----------
@@ -1885,17 +2146,24 @@ class wrplotter:
         # FFT is opt-in (allow_fft=False by default). Even when enabled it is
         # only safe for constant-width kernels on a uniform grid, and only when
         # the caller does not demand a fully exact match via precision.
-        use_fft = (
+        # Compute dx once for the uniformity check (and reuse in the FFT path).
+        dx = None
+        grid_uniform = False
+        if (
             allow_fft
             and not force_exact
             and shape in ("gauss", "gaussian", "box", "kasten")
             and x.size > 1
-            and np.allclose(np.diff(x), np.diff(x)[0], rtol=1e-9, atol=0.0)
+            and precision is not None
             and precision >= 1e-10
-        )
+        ):
+            dxi = np.diff(x)
+            dx = float(dxi[0])
+            grid_uniform = np.allclose(dxi, dx, rtol=1e-9, atol=0.0)
+        use_fft = bool(allow_fft and not force_exact and grid_uniform)
 
         if use_fft:
-            y_new = self._convol_fft_uniform(x, y, shape, value, beta)
+            y_new = self._convol_fft_uniform(x, y, shape, value, beta, dx=dx)
         elif shape in ("gauss", "gaussian"):
             sigma = value / 2.354820045
             y_new = _convol_gauss_kernel(x, y, sigma, 4.5 * sigma)
@@ -1911,9 +2179,10 @@ class wrplotter:
 
         return np.array([x, y_new])
 
-    def _convol_fft_uniform(self, x, y, shape, value, beta=0):
+    def _convol_fft_uniform(self, x, y, shape, value, beta=0, dx=None):
         """FFT convolution for Gaussian/box on a verified uniform wavelength grid."""
-        dx = float(x[1] - x[0])
+        if dx is None:
+            dx = float(x[1] - x[0])
         if shape in ("gauss", "gaussian"):
             sigma = value / 2.354820045
             half_width = max(int(np.ceil(4.5 * sigma / dx)), 1)
@@ -2211,7 +2480,7 @@ class wrplotter:
             tmp = dataset1
             flux = dataset2[index_2]
 
-        flux_to_add = interpolate.interp1d(tmp[index_1],tmp[index_2], bounds_error=False, fill_value=0,kind='linear')(wavegrid)
+        flux_to_add = np.interp(wavegrid, tmp[index_1], tmp[index_2], left=0.0, right=0.0)
         flux = flux + flux_to_add
 
         # keep the same format (x,y) as the original arrays
@@ -2241,7 +2510,7 @@ class wrplotter:
         """
         xdata = np.float64(dataset[0])
         # if not monotinic we cannot interpolate
-        if not (np.sort(xdata) == xdata).all():
+        if not _is_monotonic_ascending(xdata):
             print("Error: Dataset not monotonic.")
             print("Returining unmodified dataset.")
             return dataset
@@ -2351,6 +2620,8 @@ class wrplotter:
         parameters T and/or VTURB is specified, HLYMAN applies Voigt profiles with the according 
         Doppler velocity.
         
+        **Validation / reference only** — prefer ``command_hlymana`` in production.
+
         Parameters
         ----------
         dataset: np.array or list
@@ -2381,59 +2652,12 @@ class wrplotter:
         -------
         The dataset must be monotonic.
         """
-        # wavelenghts of H Ly lines
-        XLAM0 = np.float64([1215.671, 1025.722, 972.5366, 949.74297, 
-                 937.80344, 930.74824, 926.22571, 923.15037, 
-                 920.96313, 919.35146, 918.12939, 917.18061,
-                 916.42917, 915.82388, 915.32904, 914.91936,
-                 914.57629, 914.28622, 914.0386, 913.82569,   
-                 913.64126, 913.48036, 913.33922, 913.2147,   
-                 913.10431, 913.00597, 912.918, 912.83898,   
-                 912.76775, 912.70331, 912.64482])
-
-        # constants of formulae 16 and 22 from GROENEWEGEN & LAMERS, 1989
-        # note: extrapolated for lines higher than Ly 1-11!
-        C0 = np.float64([7.056E-11, 4.428E-11, 3.788E-11, 3.522E-11, 
-              3.381E-11, 3.298E-11, 3.243E-11, 3.204E-11, 
-              3.177E-11, 3.156E-11, 3.141E-11, 3.129E-11, 
-              3.12E-11, 3.112E-11, 3.106E-11, 3.101E-11, 
-              3.097E-11, 3.093E-11, 3.09E-11, 3.087E-11, 
-              3.085E-11, 3.083E-11, 3.081E-11, 3.079E-11, 
-              3.078E-11, 3.077E-11, 3.076E-11, 3.075E-11,  
-              3.074E-11, 3.073E-11, 3.072E-11])
-
-        C1 = np.float64([1.657E+09, 3.575E+10, 2.402E+11, 9.867E+11, 
-              3.059E+12, 7.871E+12, 1.773E+13, 3.628E+13, 
-              6.036E+13, 9.76E+13, 1.427E+14, 1.941E+14, 
-              2.505E+14, 3.106E+14, 3.734E+14, 4.381E+14, 
-              5.042E+14, 5.712E+14, 6.387E+14, 7.064E+14, 
-              7.743E+14, 8.421E+14, 9.098E+14, 9.773E+14, 
-              1.044E+15, 1.111E+15, 1.178E+15, 1.244E+15, 
-              1.31E+15, 1.376E+15, 1.441E+15])
-
-        # f values (oscillator strengths) of the Lyman lines
-        FVALUE = np.float64([4.1620E-01, 7.9100E-02, 2.8990E-02, 1.3940E-02,
-                  7.7990E-03, 4.8140E-03, 3.1830E-03, 2.2160E-03, 
-                  1.6050E-03, 1.2010E-03, 9.2140E-04, 7.2270E-04,
-                  5.7740E-04, 4.6860E-04, 3.8560E-04, 3.2110E-04, 
-                  2.7030E-04, 2.2960E-04, 1.9670E-04, 1.6980E-04, 
-                  1.4760E-04, 1.2910E-04, 1.1360E-04, 1.0050E-04, 
-                  8.9290E-05, 7.9700E-05, 7.1450E-05, 6.4300E-05, 
-                  5.8070E-05, 5.2610E-05, 4.7830E-05])
-
-        # Gamma values (damping constants) of the Lyman lines
-        # The first 5 Gammas are from Morton (2003), ApJS 149: 205-238;
-        # this exactly reproduces the Groenewegen & Lamers profiles.
-        # Further values  were computed by Thomas Rauch (08.09.2012), 
-        # according to Groenewegen & Lamers (1989); 
-        GAMM = np.float64([6.26500E+08, 1.89700E+08, 8.12700E+07, 4.20400E+07,
-                 2.45000E+07, 1.4043E+07, 9.3788E+06, 6.5742E+06, 
-                 4.7849E+06, 3.5931E+06, 2.7643E+06, 2.1728E+06, 
-                 1.7388E+06, 1.4131E+06, 1.1641E+06, 9.7030E+05, 
-                 8.1739E+05, 6.9477E+05, 5.9556E+05, 5.1437E+05,
-                 4.4730E+05, 3.9138E+05, 3.4449E+05, 3.0485E+05,
-                 2.7091E+05, 2.4188E+05, 2.1689E+05, 1.9522E+05,
-                 1.7632E+05, 1.5978E+05, 1.4527E+05])
+        # H Lyman atomic data (module-level constants)
+        XLAM0 = _HLY_XLAM0
+        C0 = _HLY_C0
+        C1 = _HLY_C1
+        FVALUE = _HLY_FVALUE
+        GAMM = _HLY_GAMM
 
         # hydrogen column density for E(B-V) = 1mag
         C2 = 3.8e21
@@ -2476,11 +2700,11 @@ class wrplotter:
         
         # expand data to insert Lyman lines
         # dataset must be monotonic
-        if not (np.sort(dataset[0]) == dataset[0]).all():
+        if not _is_monotonic_ascending(dataset[0]):
             print("Warning: Dataset not monotonic.")
             print("I will sort it for you.")
             dataset = self.command_sort(dataset)
-            if not (np.sort(dataset[0]) == dataset[0]).all():
+            if not _is_monotonic_ascending(dataset[0]):
                 print("Error: something when wrong when sorting the array.")
                 return 
         
@@ -2677,59 +2901,12 @@ class wrplotter:
         -------
         The dataset must be monotonic.
         """
-        # wavelenghts of H Ly lines
-        XLAM0 = np.float64([1215.671, 1025.722, 972.5366, 949.74297, 
-                 937.80344, 930.74824, 926.22571, 923.15037, 
-                 920.96313, 919.35146, 918.12939, 917.18061,
-                 916.42917, 915.82388, 915.32904, 914.91936,
-                 914.57629, 914.28622, 914.0386, 913.82569,   
-                 913.64126, 913.48036, 913.33922, 913.2147,   
-                 913.10431, 913.00597, 912.918, 912.83898,   
-                 912.76775, 912.70331, 912.64482])
-
-        # constants of formulae 16 and 22 from GROENEWEGEN & LAMERS, 1989
-        # note: extrapolated for lines higher than Ly 1-11!
-        C0 = np.float64([7.056E-11, 4.428E-11, 3.788E-11, 3.522E-11, 
-              3.381E-11, 3.298E-11, 3.243E-11, 3.204E-11, 
-              3.177E-11, 3.156E-11, 3.141E-11, 3.129E-11, 
-              3.12E-11, 3.112E-11, 3.106E-11, 3.101E-11, 
-              3.097E-11, 3.093E-11, 3.09E-11, 3.087E-11, 
-              3.085E-11, 3.083E-11, 3.081E-11, 3.079E-11, 
-              3.078E-11, 3.077E-11, 3.076E-11, 3.075E-11,  
-              3.074E-11, 3.073E-11, 3.072E-11])
-
-        C1 = np.float64([1.657E+09, 3.575E+10, 2.402E+11, 9.867E+11, 
-              3.059E+12, 7.871E+12, 1.773E+13, 3.628E+13, 
-              6.036E+13, 9.76E+13, 1.427E+14, 1.941E+14, 
-              2.505E+14, 3.106E+14, 3.734E+14, 4.381E+14, 
-              5.042E+14, 5.712E+14, 6.387E+14, 7.064E+14, 
-              7.743E+14, 8.421E+14, 9.098E+14, 9.773E+14, 
-              1.044E+15, 1.111E+15, 1.178E+15, 1.244E+15, 
-              1.31E+15, 1.376E+15, 1.441E+15])
-
-        # f values (oscillator strengths) of the Lyman lines
-        FVALUE = np.float64([4.1620E-01, 7.9100E-02, 2.8990E-02, 1.3940E-02,
-                  7.7990E-03, 4.8140E-03, 3.1830E-03, 2.2160E-03, 
-                  1.6050E-03, 1.2010E-03, 9.2140E-04, 7.2270E-04,
-                  5.7740E-04, 4.6860E-04, 3.8560E-04, 3.2110E-04, 
-                  2.7030E-04, 2.2960E-04, 1.9670E-04, 1.6980E-04, 
-                  1.4760E-04, 1.2910E-04, 1.1360E-04, 1.0050E-04, 
-                  8.9290E-05, 7.9700E-05, 7.1450E-05, 6.4300E-05, 
-                  5.8070E-05, 5.2610E-05, 4.7830E-05])
-
-        # Gamma values (damping constants) of the Lyman lines
-        # The first 5 Gammas are from Morton (2003), ApJS 149: 205-238;
-        # this exactly reproduces the Groenewegen & Lamers profiles.
-        # Further values  were computed by Thomas Rauch (08.09.2012), 
-        # according to Groenewegen & Lamers (1989); 
-        GAMM = np.float64([6.26500E+08, 1.89700E+08, 8.12700E+07, 4.20400E+07,
-                 2.45000E+07, 1.4043E+07, 9.3788E+06, 6.5742E+06, 
-                 4.7849E+06, 3.5931E+06, 2.7643E+06, 2.1728E+06, 
-                 1.7388E+06, 1.4131E+06, 1.1641E+06, 9.7030E+05, 
-                 8.1739E+05, 6.9477E+05, 5.9556E+05, 5.1437E+05,
-                 4.4730E+05, 3.9138E+05, 3.4449E+05, 3.0485E+05,
-                 2.7091E+05, 2.4188E+05, 2.1689E+05, 1.9522E+05,
-                 1.7632E+05, 1.5978E+05, 1.4527E+05])
+        # H Lyman atomic data (module-level constants)
+        XLAM0 = _HLY_XLAM0
+        C0 = _HLY_C0
+        C1 = _HLY_C1
+        FVALUE = _HLY_FVALUE
+        GAMM = _HLY_GAMM
 
         # hydrogen column density for E(B-V) = 1mag
         C2 = 3.8e21
@@ -2769,7 +2946,7 @@ class wrplotter:
         # dataset must be monotonic
         lam_full = np.asarray(dataset[0], dtype=np.float64).copy()
         flux_full = np.asarray(dataset[1], dtype=np.float64).copy()
-        if not (np.sort(lam_full) == lam_full).all():
+        if not _is_monotonic_ascending(lam_full):
             print("Warning: Dataset not monotonic.")
             print("I will sort it for you.")
             order = np.argsort(lam_full)
@@ -3015,8 +3192,10 @@ class wrplotter:
         
     def command_reddening_original(self,dataset,ebv,law="seaton",Rv=-1,info=False):
         """
-        Slow (pure-Python) EXTINCT reddening. Prefer ``command_reddening`` for
-        production use; this path is kept for validation against WRPLOT.
+        Slow (pure-Python) EXTINCT reddening.
+
+        **Validation / reference only** — prefer ``command_reddening`` in production.
+        Kept for bit-level checks against WRPLOT / the fast path.
 
         Parameters and physics are identical to ``command_reddening``.
         """
@@ -3063,11 +3242,11 @@ class wrplotter:
             print("Warning: Continuing with default value...")
 
         # dataset must be monotonic
-        if not (np.sort(dataset[0]) == dataset[0]).all():
+        if not _is_monotonic_ascending(dataset[0]):
             print("Warning: Dataset not monotonic.")
             print("I will sort it for you.")
             dataset = self.command_sort(dataset)
-            if not (np.sort(dataset[0]) == dataset[0]).all():
+            if not _is_monotonic_ascending(dataset[0]):
                 print("Error: something when wrong when sorting the array.")
                 return 
         
@@ -3392,7 +3571,7 @@ class wrplotter:
 
         x = np.asarray(dataset[0], dtype=np.float64).copy()
         y = np.asarray(dataset[1], dtype=np.float64).copy()
-        if not (np.sort(x) == x).all():
+        if not _is_monotonic_ascending(x):
             print("Warning: Dataset not monotonic.")
             print("I will sort it for you.")
             order = np.argsort(x)
@@ -3401,109 +3580,20 @@ class wrplotter:
         # Expand to 1000 points (WRPLOT EXTINCT rule)
         x, y = _expand_largest_gaps_njit(x, y, 1000)
 
-        # Precompute Fitzpatrick optical spline knots for this Rfitz
-        fitz_c2 = -0.824 + 4.717 / Rfitz
-        fitz_c1 = 2.030 - 3.007 * fitz_c2
-        fitz_yopir = np.array([
-            0.0,
-            0.26469 * Rfitz / 3.1,
-            0.82925 * Rfitz / 3.1,
-            -4.22809e-01 + 1.00270 * Rfitz + 2.13572e-04 * Rfitz ** 2,
-            -5.13540e-02 + 1.00216 * Rfitz - 7.35778e-05 * Rfitz ** 2,
-            7.00127e-01 + 1.00184 * Rfitz - 3.32598e-05 * Rfitz ** 2,
-            (
-                1.19456
-                + 1.01707 * Rfitz
-                - 5.46959e-03 * Rfitz ** 2
-                + 7.97809e-04 * Rfitz ** 3
-                - 4.45636e-05 * Rfitz ** 4
-            ),
-            (
-                fitz_c1
-                + fitz_c2 * 3.703704
-                + (
-                    3.23
-                    * 3.703704 ** 2
-                    / ((3.703704 ** 2 - 4.596 ** 2) ** 2 + (3.703704 * 0.99) ** 2)
-                )
-                + Rfitz
-            ),
-            (
-                fitz_c1
-                + fitz_c2 * 3.846154
-                + (
-                    3.23
-                    * 3.846154 ** 2
-                    / ((3.846154 ** 2 - 4.596 ** 2) ** 2 + (3.846154 * 0.99) ** 2)
-                )
-                + Rfitz
-            ),
-        ], dtype=np.float64)
-
-        seaton_ftab = np.array(
-            [1.36, 1.44, 1.84, 2.04, 2.24, 2.44, 2.66, 2.88, 3.14, 3.36, 3.56,
-             3.77, 3.96, 4.15, 4.26, 4.40, 4.52, 4.64],
-            dtype=np.float64,
-        )
-        seaton_ztab = np.array(
-            [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2,
-             2.3, 2.4, 2.5, 2.6, 2.7],
-            dtype=np.float64,
-        )
-        moneti_ftab = np.array(
-            [0.4097, 0.2804, 0.1736, 0.1108, 0.0964, 0.0923, 0.0715,
-             0.0530, 0.0510, 0.0492, 0.0477, 0.0464, 0.0452, 0.0441,
-             0.0431, 0.0463, 0.0628, 0.0989, 0.1454, 0.1431, 0.1250,
-             0.1023, 0.0835, 0.0721, 0.0634, 0.0569, 0.0545, 0.0553,
-             0.0561, 0.0573, 0.0589, 0.0612, 0.0643, 0.0677, 0.0707,
-             0.0726, 0.0730, 0.0721, 0.0704, 0.0683, 0.0663, 0.0644,
-             0.0626, 0.0610, 0.0586, 0.0561, 0.0537, 0.0515],
-            dtype=np.float64,
-        )
-        moneti_xtab = np.array(
-            [4.000, 4.097, 4.217, 4.342, 4.398, 4.477, 4.544, 4.602,
-             4.653, 4.699, 4.740, 4.778, 4.813, 4.845, 4.875, 4.903,
-             4.929, 4.954, 4.978, 5.000, 5.021, 5.041, 5.061, 5.079,
-             5.097, 5.114, 5.130, 5.146, 5.161, 5.176, 5.190, 5.204,
-             5.217, 5.230, 5.243, 5.255, 5.267, 5.279, 5.290, 5.301,
-             5.312, 5.322, 5.332, 5.342, 5.352, 5.362, 5.371, 5.380],
-            dtype=np.float64,
-        )
-        ex = np.array(
-            [0.030, 0.100, 0.284, 0.400, 0.532, 0.707, 0.867, 1.303,
-             1.840, 2.471, 3.210, 4.038, 7.111, 8.331, 10.00],
-            dtype=np.float64,
-        )
-        cx0 = np.array(
-            [17.3, 34.6, 78.1, 71.4, 95.5, 308.9, 120.6,
-             141.3, 202.7, 342.7, 352.2, 433.9, 629.0, 701.2],
-            dtype=np.float64,
-        )
-        cx1 = np.array(
-            [608.1, 267.9, 18.8, 66.8, 145.8, -380.6, 169.3,
-             146.8, 104.7, 18.7, 18.7, -2.4, 30.9, 25.2],
-            dtype=np.float64,
-        )
-        cx2 = np.array(
-            [-2150., -476.1, 4.3, -51.4, -61.1, 294.0, -47.7,
-             -31.5, -17.0, 0.0, 0.0, 0.75, 0.0, 0.0],
-            dtype=np.float64,
-        )
-        ctab3 = np.array(
-            [1., 0.17699, -0.50447, -0.02427, 0.72085, 0.01979, -0.77530, 0.32999],
-            dtype=np.float64,
-        )
-        ctab4 = np.array(
-            [0., 1.41338, 2.28305, 1.07233, -5.38434, -0.62251, 5.30260, -2.09002],
-            dtype=np.float64,
-        )
-        ctab9 = np.array([-1.073, -0.628, 0.137, -0.070], dtype=np.float64)
-        ctab10 = np.array([13.670, 4.257, -0.420, 0.374], dtype=np.float64)
+        # Fitzpatrick optical–IR Y knots for the R_V used by this law's bridge
+        rf_for_fitz = Rfitz
+        if law == "smc":
+            rf_for_fitz = RSMC
+        elif law == "smc_bar":
+            rf_for_fitz = RSMCBAR
+        fitz_yopir = _fitz_yopir_for_rv(rf_for_fitz)
 
         y_out = _reddening_kernel(
             x, y, float(ebv), law_map[law], Rv_use, Rfitz, RSMC, RLMC, RSMCBAR,
-            fitz_yopir, seaton_ftab, seaton_ztab, moneti_ftab, moneti_xtab,
-            ex, cx0, cx1, cx2, ctab3, ctab4, ctab9, ctab10,
+            fitz_yopir, _FITZ_XOPIR,
+            _SEATON_FTAB, _SEATON_ZTAB, _MONETI_FTAB, _MONETI_XTAB,
+            _EXTINCT_EX, _EXTINCT_CX0, _EXTINCT_CX1, _EXTINCT_CX2,
+            _CARDELLI_CTAB3, _CARDELLI_CTAB4, _CARDELLI_CTAB9, _CARDELLI_CTAB10,
         )
         return np.array([x, y_out])
 
@@ -3750,6 +3840,7 @@ class wrplotter:
         -------
         This is inspired by WRPLOT, but not the actual implementation.
         """
+        _ensure_plotting()
         
         # get limits of current plot
         xmin, xmax = plt.gca().get_xlim()
@@ -3878,6 +3969,7 @@ class wrplotter:
         Correct a UV spectrum for extinction by a single interstellar line.
 
         1:1 Python translation of SUBROUTINE ISMLINE in wrplot.f.
+        **Validation / reference only** — prefer ``command_ismline`` in production.
 
         Parameters
         ----------

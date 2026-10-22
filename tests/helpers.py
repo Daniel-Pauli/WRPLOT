@@ -113,7 +113,15 @@ def time_call(fn, *args, n=1, **kwargs):
     return out, float(np.median(times))
 
 
+_kernels_warmed = False
+
+
 def get_wrplotter():
+    global _kernels_warmed
+    if not _kernels_warmed:
+        from wrplot import warmup_kernels
+        warmup_kernels()
+        _kernels_warmed = True
     return wrplotter()
 
 
