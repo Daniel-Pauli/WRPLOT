@@ -448,9 +448,41 @@ command_reddening(dataset, ebv, law="seaton", Rv=-1, info=False)
 |-----------|---------|---------|
 | `dataset` | `[log10(λ/Å), log10(flux)]` | — (required) |
 | `ebv` | Colour excess \(E(B-V)\) | — (required) |
-| `law` | `seaton`, `cardelli`, `fitzpatrick`, `lmc`, `smc`, `smc_bar` | `"seaton"` |
-| `Rv` | Optional \(R_V\) where the law allows (Cardelli, Fitzpatrick, SMC) | `-1` (law default) |
+| `law` | Keyword from the table below | `"seaton"` |
+| `Rv` | Optional \(R_V = A_V / E(B-V)\) where the law allows it | `-1` (use law default) |
 | `info` | Kept for API compatibility | `False` |
+
+#### Reddening laws
+
+Same keywords and defaults as classic WRPLOT `COMMAND REDDENING`:
+
+| `law` | Default \(R_V\) | Notes | References |
+|-------|----------------:|-------|------------|
+| `seaton` | 3.1 | Default law; used ~911 Å – 1 µm. Seaton for \(\lambda < 3700\) Å, extended with Nandy et al. for \(3500 < \lambda < 10000\) Å | Seaton (1979); Nandy et al. (1975) |
+| `cardelli` | 3.1 | Established 1000 Å – 3.33 µm; used here for ~911 Å – 2.44 µm. \(R_V\) overridable | Cardelli et al. (1989) |
+| `fitzpatrick` | 3.1 | Established 1150 Å – 5 µm; used here for ~911 Å – 4 µm. \(R_V\) overridable | Fitzpatrick (1999) |
+| `lmc` | 3.2 (fixed) | Special for the LMC | Howarth (1983) |
+| `smc` | 2.7 | \(R_V\) from Bouchet et al. (1985); with \(R_V = 3.2\) it becomes the LMC law. \(R_V\) overridable | Howarth (1983); Bouchet et al. (1985) |
+| `smc_bar` | 2.74 | For \(\lambda < 3000\) Å (Gordon); to the red: Fitzpatrick with \(R_V = 2.74\); for \(\lambda > 5\) µm follows Nandy et al. | Gordon et al. (2003); Fitzpatrick (1999); Nandy et al. (1975) |
+
+Pass `Rv=-1` (default) to use the law’s default \(R_V\). Overriding \(R_V\) applies where the
+implementation allows it (Cardelli, Fitzpatrick, SMC), matching WRPLOT.
+
+Outside each law’s nominal optical/UV range, WRPLOT (and this port) extend toward
+the red with Moneti et al. (2001), and use Morrison & McCammon (1983) in the
+X-ray; see the classic WRPLOT notes for the full wavelength collage.
+
+**References**
+
+- Bouchet, P., Lequeux, J., Maurice, E., Prevot, L., & Prevot-Burnichon, M. L. 1985, A&A, 149, 330
+- Cardelli, J. A., Clayton, G. C., & Mathis, J. S. 1989, ApJ, 345, 245
+- Fitzpatrick, E. L. 1999, PASP, 111, 63
+- Gordon, K. D., Clayton, G. C., Misselt, K. A., Landolt, A. U., & Wolff, M. J. 2003, ApJ, 594, 279
+- Howarth, I. D. 1983, MNRAS, 203, 301
+- Moneti, A., Stolovy, S., Blommaert, J. A. D. L., Figer, D. F., & Najarro, F. 2001, A&A, 366, 106
+- Morrison, R. & McCammon, D. 1983, ApJ, 270, 119
+- Nandy, K., Thompson, G. I., Jamar, C., Monfils, A., & Wilson, R. 1975, A&A, 44, 195
+- Seaton, M. J. 1979, MNRAS, 187, 73P
 
 Short inputs are expanded toward ≥1000 points (largest-gap midpoints), matching
 WRPLOT behaviour.
