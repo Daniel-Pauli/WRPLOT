@@ -19,7 +19,7 @@ from helpers import OUTPUT, REF, get_wrplotter, load_uv
 
 ID_O = REF / "id_O.dat"
 
-# Cross-break gap for mid-string color splits (see __draw_wrplot_label).
+# Cross-break gap for mid-string color splits (see __ident_draw_text).
 TARGET_GAP_EM = 0.20
 GAP_EM_TOL = 0.05  # allow small font/bbox variation
 
@@ -91,22 +91,22 @@ class TestIdentsParse(unittest.TestCase):
             raise unittest.SkipTest(f"missing {ID_O}")
 
     def test_color_split_ovi_is(self):
-        segs = self.w._wrplotter__parse_wrplot_text(r"&EO\,VI&4\,(is)")
+        segs = self.w._wrplotter__ident_parse_text(r"&EO\,VI&4\,(is)")
         self.assertEqual(len(segs), 2)
         self.assertIn("VI", segs[0]["text"])
         self.assertTrue(segs[1]["text"].lstrip("\\,").startswith("(is)") or
                         "(is)" in segs[1]["text"])
         self.assertEqual(segs[0]["color"], "black")
-        self.assertEqual(segs[1]["color"], (0.0, 0.0, 1.0))
+        self.assertEqual(segs[1]["color"], "blue")  # self.colors[4]
 
     def test_mathtext_thin_space_inside_segment(self):
-        math = self.w._wrplotter__wrplot_segment_mathtext(r"O\,I\,(is)")
+        math = self.w._wrplotter__ident_mathtext(r"O\,I\,(is)")
         self.assertEqual(math, r"$\mathrm{O}\,\,\mathrm{I}\,\,\mathrm{(is)}$")
 
     def test_greek(self):
-        segs = self.w._wrplotter__parse_wrplot_text(r"&ELy#e#")
+        segs = self.w._wrplotter__ident_parse_text(r"&ELy#e#")
         self.assertEqual(len(segs), 1)
-        math = self.w._wrplotter__wrplot_segment_mathtext(segs[0]["text"])
+        math = self.w._wrplotter__ident_mathtext(segs[0]["text"])
         self.assertEqual(math, r"$\mathrm{Ly}\epsilon$")
 
 
@@ -241,7 +241,7 @@ class TestIdentsAuto(unittest.TestCase):
         """A deep trough should not pull an ident below its neighbours."""
         anchors = [1030.0, 1050.0, 1070.0]
         bases = [1.0, 0.1, 1.0]  # middle sits in the trough
-        leveled = self.w._wrplotter__level_auto_bases(anchors, bases)
+        leveled = self.w._wrplotter__ident_auto_level(anchors, bases)
         self.assertAlmostEqual(leveled[0], 1.0)
         self.assertAlmostEqual(leveled[2], 1.0)
         self.assertAlmostEqual(leveled[1], 1.0)  # raised to neighbour average
@@ -340,9 +340,9 @@ class TestIdentsAuto(unittest.TestCase):
             self.assertGreater(len(stem_bottoms), 0)
             # Lowest mark piece must start at kwargs id_y (not file \\IDY=2.0)
             self.assertAlmostEqual(min(stem_bottoms), 1.05, places=5)
-            # Lowest stem top ≈ id_y + a*id_len (a=0.43), not file \\IDLENG=0.5
+            # Lowest stem top ≈ id_y + 0.4*id_len, not file \\IDLENG=0.5
             self.assertTrue(
-                any(abs(yt - (1.05 + 0.08 * 0.43)) < 1e-4 for yt in stem_tops)
+                any(abs(yt - (1.05 + 0.08 * 0.4)) < 1e-4 for yt in stem_tops)
             )
             self.assertFalse(any(abs(yb - 2.0) < 0.05 for yb in stem_bottoms))
             plt.close(fig)

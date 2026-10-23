@@ -6,13 +6,13 @@ fast = command_reddening (numba expand + reddening kernel)
 max|d| vs WRPLOT measured on the fast path
 speedup = t(slow) / t(fast)  for that case
 
-case                     slow     fast  speedup  max|d| vs WRPLOT
-------------------  ---------  -------  -------  ----------------
-SEATON              278.23 ms  1.13 ms   245.4x          2.59e-08
-CARDELLI Rv=3.1     287.30 ms  1.07 ms   268.3x          3.42e-08
-CARDELLI Rv=5.0     282.60 ms  1.14 ms   246.9x          2.76e-08
-FITZPATRICK Rv=3.1  292.06 ms  1.17 ms   249.7x          3.48e-08
-FITZPATRICK Rv=5.0  290.32 ms  1.22 ms   238.3x          4.30e-09
-LMC                 299.71 ms  1.16 ms   257.9x          3.30e-09
-SMC                 298.54 ms  1.04 ms   287.7x          5.23e-09
-SMC_BAR             297.41 ms  1.18 ms   252.5x          4.04e-10
+case                     slow      fast  speedup  max|d| vs WRPLOT
+------------------  ---------  --------  -------  ----------------
+SEATON              284.30 ms   1.16 ms   245.6x          2.59e-08
+CARDELLI Rv=3.1     287.75 ms   1.13 ms   254.9x          3.42e-08
+CARDELLI Rv=5.0     283.79 ms   1.10 ms   257.6x          2.76e-08
+FITZPATRICK Rv=3.1  283.78 ms   1.11 ms   255.1x          3.48e-08
+FITZPATRICK Rv=5.0  283.37 ms  971.2 us   291.8x          4.30e-09
+LMC                 270.55 ms   1.19 ms   227.9x          3.30e-09
+SMC                 284.98 ms   1.05 ms   270.6x          5.23e-09
+SMC_BAR             276.61 ms   1.10 ms   250.8x          4.04e-10

@@ -41,20 +41,6 @@ def _is_monotonic_ascending(x):
 # Module-level constants (avoid rebuilding on every command_* call)
 # ---------------------------------------------------------------------------
 
-# WRPLOT default colors 0..9 (wr_info.pdf Sect. 3.4.1 / Fig. 3), RGB in [0, 1]
-_WRPLOT_COLORS = {
-    0: (1.0, 1.0, 1.0),  # white
-    1: (0.0, 0.0, 0.0),  # black
-    2: (1.0, 0.0, 0.0),  # red
-    3: (0.0, 1.0, 0.0),  # green
-    4: (0.0, 0.0, 1.0),  # dark blue
-    5: (1.0, 1.0, 0.0),  # yellow
-    6: (1.0, 0.0, 1.0),  # pink
-    7: (0.0, 1.0, 1.0),  # light blue
-    8: (0.5, 1.0, 0.0),  # light green
-    9: (0.0, 0.5, 1.0),  # blue
-}
-
 # H Lyman line atomic data (shared by command_hlymana / _original)
 _HLY_XLAM0 = np.float64([
     1215.671, 1025.722, 972.5366, 949.74297,
@@ -3611,9 +3597,19 @@ class wrplotter:
         )
         return np.array([x, y_out])
 
+    ######################################################################################################################
+    #
+    #                                 LINE IDENTIFICATIONS
+    #                    legacy: plot_idents_original  |  new: plot_idents
+    #
+    ######################################################################################################################
+
+    # --- legacy helpers (used by plot_idents_original) ---
+
     def __plot_ident(self,text,id_x,id_xoff=0,id_y=1.05,id_len=0.05,id_fontsize=10,id_linesize=0.75,id_horizontal=False,color="black",bbox_alpha=0):
         """
         Plot line identifications in a pretty and convenient way.
+
         
         Parameters
         ----------
@@ -3978,26 +3974,17 @@ class wrplotter:
                     text_boxes.append(self.__plot_idmult(text[i],wavelenghts[i],id_xoff=offs,id_y=id_ys[i],id_len=id_len,id_fontsize=id_fontsize,id_linesize=id_linesize,id_horizontal=id_horizontal,color=color,bbox_alpha=bbox_alpha))
 
 
-    # ------------------------------------------------------------------
-    # WRPLOT-style line identifications (notation-faithful plot_idents)
-    # ------------------------------------------------------------------
+    # --- plot_idents helpers (WRPLOT notation, auto placement) ---
 
-    @staticmethod
-    def __wrplot_color(index, fallback="black"):
-        """Map WRPLOT color index 0..9 to an RGB tuple."""
+    def __ident_color(self, index, fallback="black"):
+        """Map WRPLOT color index 0..9 using self.colors."""
         try:
-            return _WRPLOT_COLORS[int(index)]
-        except (KeyError, TypeError, ValueError):
+            return self.colors[int(index)]
+        except (IndexError, TypeError, ValueError):
             return fallback
 
-    def __parse_wrplot_text(self, raw, default_color="black"):
-        """
-        Parse a WRPLOT identification string into styled segments.
-
-        Honours Table 2 prefixes from wr_info.pdf (colors, sub/superscripts,
-        italics/bold, letter spacing, inclination, local fonts) and the
-        symbol / Greek substitutions used in identification files.
-        """
+    def __ident_parse_text(self, raw, default_color="black"):
+        """Parse a WRPLOT ident string into styled segments (colors, scripts, etc.)."""
         if raw is None:
             return []
         s = raw.strip().strip('"').strip("'").replace("\n", "")
@@ -4097,7 +4084,7 @@ class wrplotter:
                 code = s[i + 1]
                 if code.isdigit():
                     _flush()
-                    color = self.__wrplot_color(code, fallback=default_color)
+                    color = self.__ident_color(code, fallback=default_color)
                     i += 2
                     continue
                 if code == "T":
@@ -4165,21 +4152,8 @@ class wrplotter:
         return [seg for seg in segments if seg["text"]]
 
     @staticmethod
-    def __wrplot_segment_mathtext(text, script="normal", keep_leading_space=False):
-        """
-        Build matplotlib mathtext for one styled segment.
-
-        Plain runs go in ``\\mathrm{...}``; WRPLOT thin spaces (``\\,``) become
-        ``\\,\\,`` *between* those runs (matplotlib often swallows a single
-        ``\\,`` inside ``\\mathrm``). Greek / other math commands stay outside
-        ``\\mathrm`` so they render correctly, e.g.
-        ``O\\,I\\,(is)`` → ``$\\mathrm{O}\\,\\,\\mathrm{I}\\,\\,\\mathrm{(is)}$``,
-        ``Ly\\epsilon`` → ``$\\mathrm{Ly}\\epsilon$``.
-
-        If ``keep_leading_space`` is True (used for segments after a mid-string
-        style/color break), a leading ``\\,`` is kept so the gap before e.g.
-        ``(is)`` is not lost across separate Text artists.
-        """
+    def __ident_mathtext(text, script="normal"):
+        """Build mathtext for one segment (\\, → \\,\\, between \\mathrm runs)."""
         # Tokenize into ('text', str), ('thin',), ('cmd', str), ('space',)
         tokens = []
         i = 0
@@ -4232,19 +4206,15 @@ class wrplotter:
                 # \mathrm is often swallowed)
                 parts.append(r"\,\,")
 
-        # Collapse runs of spacers; optionally keep a leading spacer
         cleaned = []
         for p in parts:
             if p == r"\,\,":
                 if cleaned and cleaned[-1] != r"\,\,":
                     cleaned.append(p)
-                elif not cleaned and keep_leading_space:
-                    cleaned.append(p)
             else:
                 cleaned.append(p)
-        if not keep_leading_space:
-            while cleaned and cleaned[0] == r"\,\,":
-                cleaned.pop(0)
+        while cleaned and cleaned[0] == r"\,\,":
+            cleaned.pop(0)
         while cleaned and cleaned[-1] == r"\,\,":
             cleaned.pop()
 
@@ -4255,16 +4225,9 @@ class wrplotter:
             return r"$^{" + core + "}$"
         return r"$" + core + "$"
 
-    def __draw_wrplot_label(self, x, y, segments, fontsize=12, horizontal=False,
+    def __ident_draw_text(self, x, y, segments, fontsize=12, horizontal=False,
                             bbox_alpha=0):
-        """
-        Draw a multi-style WRPLOT label at (x, y).
-
-        Vertical (default): segments advance in +y (string reads upward).
-        Horizontal: segments advance in +x.
-
-        Returns [x_left, x_right] of the full label in data coordinates.
-        """
+        """Draw a multi-style WRPLOT label; returns [x_left, x_right] in data coords."""
         ax = plt.gca()
         rotation = 0 if horizontal else 90
         from matplotlib.transforms import Affine2D
@@ -4313,9 +4276,7 @@ class wrplotter:
         for i, seg in enumerate(segments):
             # Cross-break \, is applied as a data-coord gap when stacking
             # (Agg often ignores leading \,\, in mathtext).
-            math = self.__wrplot_segment_mathtext(
-                seg["text"], script=seg["script"], keep_leading_space=False,
-            )
+            math = self.__ident_mathtext(seg["text"], script=seg["script"])
             fs = fontsize * (script_scale if seg["script"] != "normal" else 1.0)
             family = seg["family"] or "sans-serif"
             style = "italic" if (seg["italic"] or seg["incline"] == "right") else "normal"
@@ -4394,14 +4355,11 @@ class wrplotter:
             xs.extend(corners[:, 0])
         return [float(min(xs)), float(max(xs))]
 
-    def __measure_wrplot_label_xspan(self, ax, x, y, segments, fontsize=12,
+    def __ident_text_width(self, ax, x, y, segments, fontsize=12,
                                      horizontal=False):
-        """
-        Measure the data-x span of a label without leaving artists on the axes.
-        """
-        # Draw temporarily, measure, remove
+        """Measure data-x span of a label without leaving artists on the axes."""
         n_before = len(ax.texts)
-        box = self.__draw_wrplot_label(
+        box = self.__ident_draw_text(
             x, y, segments, fontsize=fontsize, horizontal=horizontal, bbox_alpha=0,
         )
         # remove texts we just added
@@ -4409,26 +4367,23 @@ class wrplotter:
             ax.texts[-1].remove()
         return box
 
-    def __plot_ident_mark(self, id_x, id_xoff, id_y, id_len, id_linesize, color):
-        """Draw the three-piece IDENT tick (WRPLOT-like proportions)."""
-        # Defaults close to IDMLENG a=0.43, b=0.43 → lower/mid/upper
-        a, b = 0.43, 0.43
+    def __ident_mark(self, id_x, id_xoff, id_y, id_len, id_linesize, color):
+        """Draw the three-piece IDENT tick (lower 0.4 / mid 0.1 / upper 0.5)."""
         y0 = id_y
-        y1 = id_y + id_len * a
-        y2 = id_y + id_len * (a + b)
+        y1 = id_y + id_len * 0.4
+        y2 = id_y + id_len * 0.5
         y3 = id_y + id_len
         plt.plot([id_x, id_x], [y0, y1], "-", color=color, lw=id_linesize)
         plt.plot([id_x, id_x + id_xoff], [y1, y2], "-", color=color, lw=id_linesize)
         plt.plot([id_x + id_xoff, id_x + id_xoff], [y2, y3], "-", color=color, lw=id_linesize)
         return y3
 
-    def __plot_idmult_mark(self, id_x, id_xoff, id_y, id_len, id_linesize, color):
-        """Draw the IDMULT comb + connector to the label."""
+    def __idmult_mark(self, id_x, id_xoff, id_y, id_len, id_linesize, color):
+        """Draw the IDMULT comb + connector (same 0.4 / 0.1 / 0.5 split)."""
         id_x = list(id_x)
-        a, b = 0.43, 0.43
         y0 = id_y
-        y1 = id_y + id_len * a
-        y2 = id_y + id_len * (a + b)
+        y1 = id_y + id_len * 0.4
+        y2 = id_y + id_len * 0.5
         y3 = id_y + id_len
         for xv in id_x:
             plt.plot([xv, xv], [y0, y1], "-", color=color, lw=id_linesize)
@@ -4438,15 +4393,9 @@ class wrplotter:
         plt.plot([center + id_xoff, center + id_xoff], [y2, y3], "-", color=color, lw=id_linesize)
         return y3, center
 
-    def __parse_ident_file(self, file, xmin, xmax, default_id_y, default_id_len,
+    def __ident_read_file(self, file, xmin, xmax, default_id_y, default_id_len,
                            default_color, ignore_file_geometry=False):
-        """
-        Parse a WRPLOT identification file into items in file order.
-
-        Honours \\IDENT / \\IDMULT, and file-local \\IDY / \\IDLENG (optional
-        ``U`` = y-units; bare values are also treated as y-units) unless
-        ``ignore_file_geometry`` is True (then kwargs defaults are used for all).
-        """
+        """Parse \\IDENT / \\IDMULT file; honour \\IDY / \\IDLENG unless ignore_file_geometry."""
         items = []
         id_y = default_id_y
         id_len = default_id_len
@@ -4507,7 +4456,7 @@ class wrplotter:
                         items.append({
                             "kind": "mult",
                             "x": numbers,
-                            "segments": self.__parse_wrplot_text(rest, default_color),
+                            "segments": self.__ident_parse_text(rest, default_color),
                             "id_y": id_y,
                             "id_len": id_len,
                         })
@@ -4527,14 +4476,14 @@ class wrplotter:
                     items.append({
                         "kind": "ident",
                         "x": val,
-                        "segments": self.__parse_wrplot_text(rest, default_color),
+                        "segments": self.__ident_parse_text(rest, default_color),
                         "id_y": id_y,
                         "id_len": id_len,
                     })
         return items
 
     @staticmethod
-    def __spectrum_xy_from_axes(ax):
+    def __ident_spectrum(ax):
         """
         Return (x, y) of the densest Line2D on *ax* (assumed to be the spectrum).
         """
@@ -4551,7 +4500,7 @@ class wrplotter:
         return best
 
     @staticmethod
-    def __local_spectrum_stat(x, y, x_lo, x_hi, window, how="mean"):
+    def __ident_spec_stat(x, y, x_lo, x_hi, window, how="mean"):
         """
         Spectrum statistic in ``[x_lo - window, x_hi + window]``.
 
@@ -4571,18 +4520,15 @@ class wrplotter:
         j = int(np.argmin(np.abs(x - mid)))
         return float(y[j])
 
-    def __local_spectrum_mean(self, x, y, x_lo, x_hi, window):
-        return self.__local_spectrum_stat(x, y, x_lo, x_hi, window, how="mean")
+    def __ident_spec_mean(self, x, y, x_lo, x_hi, window):
+        return self.__ident_spec_stat(x, y, x_lo, x_hi, window, how="mean")
 
-    def __local_spectrum_max(self, x, y, x_lo, x_hi, window):
-        return self.__local_spectrum_stat(x, y, x_lo, x_hi, window, how="max")
+    def __ident_spec_max(self, x, y, x_lo, x_hi, window):
+        return self.__ident_spec_stat(x, y, x_lo, x_hi, window, how="max")
 
     @staticmethod
-    def __level_auto_bases(anchors, bases):
-        """
-        Raise bases that sit in deep absorption dips to the average of their
-        wavelength neighbours, so idents share a smoother height.
-        """
+    def __ident_auto_level(anchors, bases):
+        """Raise dip bases to the mean of wavelength neighbours."""
         n = len(bases)
         if n == 0:
             return bases
@@ -4599,154 +4545,45 @@ class wrplotter:
                 leveled[i] = max(raw[i], float(np.mean(neigh)))
         return leveled
 
-    def plot_idents(self, file, id_xoff=0, id_y=1.05, id_len=0.05, id_fontsize=12,
-                    id_linesize=0.75, id_horizontal=False, color="black", bbox_alpha=0,
-                    color_line_from_text=False, auto=False, auto_offset=0.2,
-                    auto_window=None, auto_min=None, fixed=False):
-        """
-        Read and plot line identifications from a WRPLOT-style file.
+    @staticmethod
+    def __ident_anchor(it):
+        if it["kind"] == "ident":
+            return float(it["x"])
+        return 0.5 * (float(it["x"][0]) + float(it["x"][-1]))
 
-        Preserves WRPLOT text notation (colors ``&0``–``&9``, sub/superscripts,
-        italics/bold, letter spacing, fonts, Greek ``#a#``, symbols) and avoids
-        overlapping labels by automatic x-offsets. File-local ``\\IDY`` and
-        ``\\IDLENG`` (with optional ``U`` for y-units) are honoured unless
-        ``fixed=True``; kwargs are the defaults.
+    @staticmethod
+    def __ident_x_span(it, offs):
+        """Wavelength span covering the mark(s) and the shifted text."""
+        if it["kind"] == "ident":
+            xs = [float(it["x"]), float(it["x"]) + float(offs)]
+        else:
+            xs = [float(v) for v in it["x"]]
+            center = 0.5 * (xs[0] + xs[-1])
+            xs.append(center + float(offs))
+        return min(xs), max(xs)
 
-        Parameters
-        ----------
-        file : str
-            File containing the line identifications (e.g. ``id_O.dat``).
-        id_xoff : float
-            Global extra x-offset added to every label (data units).
-        id_y : float
-            Default y where identification marks start (overridden by ``\\IDY``
-            unless ``fixed=True``). Ignored when ``auto=True``.
-        id_len : float
-            Default mark length in y-units (overridden by ``\\IDLENG`` unless
-            ``fixed=True``).
-        id_fontsize : float
-            Font size of identification text.
-        id_linesize : float
-            Line width of the identification marks.
-        id_horizontal : bool
-            If True, write labels horizontally (WRPLOT ``\\IDHOR``); default vertical.
-        color : color
-            Default color for marks and text (WRPLOT color 1 / black). ``&n`` in
-            the label string recolors text segments; marks keep this color unless
-            ``color_line_from_text`` is True.
-        bbox_alpha : float
-            Opacity of a white text background (0 = none, 1 = opaque).
-        color_line_from_text : bool
-            If True, draw each identification mark in the color of the first
-            letter/segment of its label (from ``&n`` or ``color``). If False
-            (default), marks always use ``color``.
-        auto : bool
-            If True, place each mark above the local spectrum: ``id_y`` is based
-            on the mean flux near the ident (mark wavelengths and label x) plus
-            ``auto_offset``. Deep absorption dips are leveled to neighbouring
-            idents, and ``id_y`` is then raised if needed so the mark (including
-            ``\\IDMULT`` combs) clears the local spectrum maximum by
-            ``auto_offset``. Requires a spectrum Line2D on the current axes.
-            Mutually exclusive with ``fixed``.
-        auto_offset : float
-            Vertical clearance above the (leveled) local mean / spectrum max
-            when ``auto=True`` (y-units). Default 0.2.
-        auto_window : float or None
-            Half-width in x (wavelength) used when averaging the spectrum around
-            an ident. Default: ``0.5`` (Å for wavelength plots). Pass a larger
-            value for broader continuum averaging.
-        auto_min : float or None
-            Optional floor for ``id_y`` when ``auto=True`` (e.g. ``1.1``).
-            ``None`` (default) applies no minimum.
-        fixed : bool
-            If True, use kwargs ``id_y`` and ``id_len`` for every ident and
-            ignore file-local ``\\IDY`` / ``\\IDLENG``. Mutually exclusive with
-            ``auto``.
-
-
-        Notes
-        -----
-        The previous implementation is available as ``plot_idents_original``.
-        When ``auto=True``, file-local ``\\IDY`` values are ignored.
-        """
-        _ensure_plotting()
-
-        if fixed and auto:
-            raise ValueError(
-                "plot_idents: 'fixed' and 'auto' cannot be used together."
-            )
-
-        ax = plt.gca()
-        xmin, xmax = ax.get_xlim()
-        # Provisional id_y for parsing; overwritten per-ident when auto=True
-        parse_id_y = float(id_y)
-        items = self.__parse_ident_file(
-            file, xmin, xmax, default_id_y=parse_id_y, default_id_len=id_len,
-            default_color=color, ignore_file_geometry=bool(fixed),
-        )
-        if not items:
-            return
-
-        if fixed:
-            for it in items:
-                it["id_y"] = float(id_y)
-                it["id_len"] = float(id_len)
-
-        spec = None
-        win = auto_window
-        if auto:
-            spec = self.__spectrum_xy_from_axes(ax)
-            if spec is None:
-                raise ValueError(
-                    "plot_idents(auto=True) needs a spectrum Line2D on the "
-                    "current axes (plot the spectrum before calling plot_idents)."
-                )
-            if win is None:
-                win = 0.5
-
-        def _anchor(it):
-            if it["kind"] == "ident":
-                return float(it["x"])
-            return 0.5 * (float(it["x"][0]) + float(it["x"][-1]))
-
-        def _mark_color(it):
-            if color_line_from_text and it["segments"]:
-                return it["segments"][0]["color"]
-            return color
-
-        def _x_span_for_mean(it, offs):
-            """Wavelength span covering the mark(s) and the shifted text."""
-            if it["kind"] == "ident":
-                xs = [float(it["x"]), float(it["x"]) + float(offs)]
-            else:
-                xs = [float(v) for v in it["x"]]
-                center = 0.5 * (xs[0] + xs[-1])
-                xs.append(center + float(offs))
-            return min(xs), max(xs)
-
-        # Place left-to-right so automatic spacing matches WRPLOT's default
-        order = sorted(range(len(items)), key=lambda i: _anchor(items[i]))
-
-        # --- pass 1: resolve x-offsets (overlap avoidance) ---
-        placements = []  # (idx, offs, centre) for items that will be drawn
+    def __ident_place(self, items, ax, xmax, id_xoff, id_fontsize, id_horizontal,
+                      auto=False, auto_offset=0.2, spec=None, win=0.5):
+        """Pass 1: left-to-right x-offsets that avoid overlapping labels."""
+        order = sorted(range(len(items)), key=lambda i: self.__ident_anchor(items[i]))
+        placements = []
         last_right = None
         gap = None
         for idx in order:
             it = items[idx]
             if not it["segments"]:
                 continue
-            anchor = _anchor(it)
+            anchor = self.__ident_anchor(it)
 
             if auto:
-                x_lo, x_hi = _x_span_for_mean(it, 0.0)
-                prov_base = self.__local_spectrum_mean(
+                x_lo, x_hi = self.__ident_x_span(it, 0.0)
+                prov_base = self.__ident_spec_mean(
                     spec[0], spec[1], x_lo, x_hi, win,
                 )
                 it["id_y"] = prov_base + float(auto_offset)
 
             text_y = it["id_y"] + it["id_len"] * 1.05
-
-            native = self.__measure_wrplot_label_xspan(
+            native = self.__ident_text_width(
                 ax, anchor + id_xoff, text_y, it["segments"],
                 fontsize=id_fontsize, horizontal=id_horizontal,
             )
@@ -4761,61 +4598,137 @@ class wrplotter:
             if centre >= xmax:
                 continue
 
-            # Approximate label x-extent for next overlap check
             last_right = centre + half
             placements.append((idx, offs, centre))
+        return placements
 
-        # --- pass 2 (auto): mean + neighbour leveling, then clear spectrum max ---
-        if auto and placements:
-            anchors = []
-            bases = []
-            peaks = []
-            for idx, offs, _centre in placements:
-                it = items[idx]
-                x_lo, x_hi = _x_span_for_mean(it, offs)
-                bases.append(
-                    self.__local_spectrum_mean(spec[0], spec[1], x_lo, x_hi, win)
-                )
-                # Max under mark stems/comb and shifted text (IDMULT bar span)
-                peaks.append(
-                    self.__local_spectrum_max(spec[0], spec[1], x_lo, x_hi, win)
-                )
-                anchors.append(_anchor(it))
-            leveled = self.__level_auto_bases(anchors, bases)
-            off = float(auto_offset)
-            for (idx, offs, _centre), base, peak in zip(placements, leveled, peaks):
-                # Keep mean-based height, but never let the mark sit in/through
-                # an emission peak (or any spectrum above the mean).
-                id_y_auto = max(base, peak) + off
-                if auto_min is not None:
-                    id_y_auto = max(id_y_auto, float(auto_min))
-                items[idx]["id_y"] = id_y_auto
-                items[idx]["_offs"] = offs
+    def __ident_auto_heights(self, items, placements, spec, win, auto_offset,
+                             auto_min=None):
+        """Pass 2: set id_y from local mean, neighbour leveling, and spectrum max."""
+        if not placements:
+            return
+        anchors = []
+        bases = []
+        peaks = []
+        for idx, offs, _centre in placements:
+            it = items[idx]
+            x_lo, x_hi = self.__ident_x_span(it, offs)
+            bases.append(self.__ident_spec_mean(spec[0], spec[1], x_lo, x_hi, win))
+            peaks.append(self.__ident_spec_max(spec[0], spec[1], x_lo, x_hi, win))
+            anchors.append(self.__ident_anchor(it))
+        leveled = self.__ident_auto_level(anchors, bases)
+        off = float(auto_offset)
+        for (idx, offs, _centre), base, peak in zip(placements, leveled, peaks):
+            id_y_auto = max(base, peak) + off
+            if auto_min is not None:
+                id_y_auto = max(id_y_auto, float(auto_min))
+            items[idx]["id_y"] = id_y_auto
+            items[idx]["_offs"] = offs
 
-        # --- pass 3: draw ---
+    def __ident_draw_all(self, items, placements, id_fontsize, id_linesize,
+                         id_horizontal, bbox_alpha, color, color_line_from_text,
+                         auto=False):
+        """Pass 3: draw marks and labels."""
         for idx, offs, _centre in placements:
             it = items[idx]
             if auto:
                 offs = it.get("_offs", offs)
             text_y = it["id_y"] + it["id_len"] * 1.05
-            line_color = _mark_color(it)
+            if color_line_from_text and it["segments"]:
+                line_color = it["segments"][0]["color"]
+            else:
+                line_color = color
 
             if it["kind"] == "ident":
-                self.__plot_ident_mark(
+                self.__ident_mark(
                     it["x"], offs, it["id_y"], it["id_len"], id_linesize, line_color,
                 )
-                self.__draw_wrplot_label(
+                self.__ident_draw_text(
                     it["x"] + offs, text_y, it["segments"],
                     fontsize=id_fontsize, horizontal=id_horizontal, bbox_alpha=bbox_alpha,
                 )
             else:
-                _y_top, center = self.__plot_idmult_mark(
+                _y_top, center = self.__idmult_mark(
                     it["x"], offs, it["id_y"], it["id_len"], id_linesize, line_color,
                 )
-                self.__draw_wrplot_label(
+                self.__ident_draw_text(
                     center + offs, text_y, it["segments"],
                     fontsize=id_fontsize, horizontal=id_horizontal, bbox_alpha=bbox_alpha,
                 )
+
+    def plot_idents(self, file, id_xoff=0, id_y=1.05, id_len=0.05, id_fontsize=12,
+                    id_linesize=0.75, id_horizontal=False, color="black", bbox_alpha=0,
+                    color_line_from_text=False, auto=False, auto_offset=0.2,
+                    auto_window=None, auto_min=None, fixed=False):
+        """
+        Plot WRPLOT-style line identifications (notation, auto offsets, optional auto y).
+
+        Honours ``\\IDY`` / ``\\IDLENG`` unless ``fixed=True``. ``auto=True`` places
+        marks above the local spectrum (mutually exclusive with ``fixed``).
+        Legacy implementation: ``plot_idents_original``.
+
+        Parameters
+        ----------
+        file : str
+            Identification file (e.g. ``id_O.dat``).
+        id_xoff, id_y, id_len, id_fontsize, id_linesize, id_horizontal, color, bbox_alpha
+            Same meaning as ``plot_idents_original`` (defaults / mark style).
+        color_line_from_text : bool
+            If True, mark color follows the first text segment's ``&n`` color.
+        auto : bool
+            Place marks above local spectrum mean/max (+ ``auto_offset``).
+        auto_offset : float
+            Clearance above spectrum when ``auto=True`` (default 0.2).
+        auto_window : float or None
+            Half-width in x for local spectrum stats (default 0.5).
+        auto_min : float or None
+            Optional floor for ``id_y`` when ``auto=True``.
+        fixed : bool
+            Use kwargs ``id_y`` / ``id_len`` for every ident; ignore file geometry.
+        """
+        _ensure_plotting()
+
+        if fixed and auto:
+            raise ValueError(
+                "plot_idents: 'fixed' and 'auto' cannot be used together."
+            )
+
+        ax = plt.gca()
+        xmin, xmax = ax.get_xlim()
+        items = self.__ident_read_file(
+            file, xmin, xmax, default_id_y=float(id_y), default_id_len=id_len,
+            default_color=color, ignore_file_geometry=bool(fixed),
+        )
+        if not items:
+            return
+
+        if fixed:
+            for it in items:
+                it["id_y"] = float(id_y)
+                it["id_len"] = float(id_len)
+
+        spec = None
+        win = 0.5 if auto_window is None else auto_window
+        if auto:
+            spec = self.__ident_spectrum(ax)
+            if spec is None:
+                raise ValueError(
+                    "plot_idents(auto=True) needs a spectrum Line2D on the "
+                    "current axes (plot the spectrum before calling plot_idents)."
+                )
+
+        placements = self.__ident_place(
+            items, ax, xmax, id_xoff, id_fontsize, id_horizontal,
+            auto=auto, auto_offset=auto_offset, spec=spec, win=win,
+        )
+        if auto:
+            self.__ident_auto_heights(
+                items, placements, spec, win, auto_offset, auto_min=auto_min,
+            )
+        self.__ident_draw_all(
+            items, placements, id_fontsize, id_linesize, id_horizontal,
+            bbox_alpha, color, color_line_from_text, auto=auto,
+        )
 
     def command_ismline_original(self, dataset, coldens, l0, fvalue, gamm,
                         atmass=None, vrad=0.0, temp=-273.15, vturb=0.0,
