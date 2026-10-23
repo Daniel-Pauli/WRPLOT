@@ -174,8 +174,13 @@ idents or overlays.
 ### `figure(figsize=None, gridsize=None, fontsize=14, **kwargs)`
 
 Creates a Matplotlib figure with Helvetica / TeX-oriented defaults and an
-optional gridspec (`gridsize=(nrows, ncols)`). Extra kwargs go to
-`matplotlib.pyplot.figure`.
+optional gridspec. Extra kwargs go to `matplotlib.pyplot.figure`.
+
+| Argument | Meaning | Default |
+|----------|---------|---------|
+| `figsize` | Width, height [inches] | Matplotlib default |
+| `gridsize` | `(nrows, ncols)` for subplots | `(1, 1)` |
+| `fontsize` | Base font size | `14` |
 
 ```python
 w.figure(figsize=(8.27, 11.69), gridsize=(2, 1), fontsize=12)  # A4-ish
@@ -184,23 +189,27 @@ w.figure(figsize=(8.27, 11.69), gridsize=(2, 1), fontsize=12)  # A4-ish
 ### `get_grid()` / `get_subplot(xrange=None, yrange=None)`
 
 Inspect or select a subplot from the gridspec. `xrange` / `yrange` are half-open
-index slices on the grid (handle with care; less tested than `plot`).
+index slices on the grid (handle with care; less tested than `plot`). Both
+default to `None` (single axes / full figure).
 
 ### `plot(x, y, …)`
 
 Main plotting method. Important keyword arguments:
 
-| Argument | Role |
-|----------|------|
-| `XRANGE`, `YRANGE` | Axis limits `(min, max)`; `None` → auto |
-| `XTICKS`, `YTICKS` | `(major, minor)` spacing |
-| `DARUNTER` | Tick origin `(x0, y0)` |
-| `LABELS` | `(xlabel, ylabel)` |
-| `ALT` | Put labels on opposite side `(x, y)` |
-| `NOLAB` | Suppress tick labels `(x, y)` |
-| `SYMBOL`, `SIZE`, `PEN`, `COLOR` | Style (see above) |
-| `HATCHED` | Hatch fill under curve |
-| `spline_res` | Sampling for cubic-spline symbols 6/7 |
+| Argument | Role | Default |
+|----------|------|---------|
+| `XRANGE`, `YRANGE` | Axis limits `(min, max)`; `None` → auto | `(None, None)` |
+| `XTICKS`, `YTICKS` | `(major, minor)` spacing | `(None, None)` |
+| `DARUNTER` | Tick origin `(x0, y0)` | `(0., 0.)` |
+| `LABELS` | `(xlabel, ylabel)` | `("", "")` |
+| `ALT` | Put labels on opposite side `(x, y)` | `(False, False)` |
+| `NOLAB` | Suppress tick labels `(x, y)` | `(False, False)` |
+| `SYMBOL` | Style code or `(linestyle, marker)` | `1` (cross) |
+| `SIZE` | Marker size; negative → fill | `0.3` |
+| `PEN` | Line width scale | `1` |
+| `COLOR` | Index `0`–`9`, name, RGB(A) | `1` (black) |
+| `HATCHED` | Hatch fill under curve | `None` |
+| `spline_res` | Sampling for cubic-spline symbols 6/7 | `1e-3` |
 
 Extra kwargs are forwarded to Matplotlib `plot` / `fill_between` where relevant
 (`markersize`, `alpha`, `y2`, …).
@@ -219,10 +228,14 @@ Shows the current figure (`plt.show()`).
 
 Load a table:
 
-- **`inckey=None`** — plain XY table via `numpy.loadtxt` (comment characters
-  include `#`, `*`, `N=`, `PLOT`, …). Returns `.T` so shape is `(2, N)`.
-- **`inckey=…`** — search for a keyword in a PoWR-style file, then read the
-  `N=` block numbered by `dataset`.
+| Argument | Meaning | Default |
+|----------|---------|---------|
+| `path` | File to read | — (required) |
+| `inckey` | If set, find this keyword then read an `N=` block | `None` (plain XY via `loadtxt`) |
+| `dataset` | Which `N=` block to read when `inckey` is set | `1` |
+
+Comment characters for the plain-table path include `#`, `*`, `N=`, `PLOT`, ….
+Returns shape `(2, N)`.
 
 ```python
 spec = w.command_include("spectrum.dat")
@@ -240,17 +253,17 @@ through to `savetxt`.
 
 Unless noted, methods return a new `[x, y]` array.
 
-| Method | Effect |
-|--------|--------|
-| `command_log(dataset, axis=None)` | \(\log_{10}\) of both axes, or `"x"` / `"y"` only |
-| `command_dex(dataset, axis=None)` | \(10^{x}\) (undo log) |
-| `command_cut(dataset, cuttingrange, axis=None)` | Keep points inside a range |
-| `command_plus` / `command_minus` | Add / subtract a value on an axis |
-| `command_multiply` / `command_divide` | Scale an axis |
-| `command_ari(dataset1, dataset2, axis="y")` | Add two spectra on a common grid |
-| `command_insert(dataset, x)` | Insert one \(x\) by linear interpolation |
-| `command_sort(dataset)` | Sort by \(x\) |
-| `command_filter(magnitude, filter_name)` | Magnitude → \((\lambda_\mathrm{c}, F_\lambda)\) |
+| Method | Effect | Default (`axis` / notes) |
+|--------|--------|--------------------------|
+| `command_log(dataset, axis=…)` | \(\log_{10}\) of both axes, or `"x"` / `"y"` only | `axis=None` (both) |
+| `command_dex(dataset, axis=…)` | \(10^{x}\) (undo log) | `axis=None` (both) |
+| `command_cut(dataset, cuttingrange, axis=…)` | Keep points inside a range | `axis=None` (both axes) |
+| `command_plus` / `command_minus` | Add / subtract a value on an axis | `axis="x"` |
+| `command_multiply` / `command_divide` | Scale an axis | `axis="x"` |
+| `command_ari(dataset1, dataset2, axis=…)` | Add two spectra on a common grid | `axis="y"` |
+| `command_insert(dataset, x)` | Insert one \(x\) by linear interpolation | — |
+| `command_sort(dataset)` | Sort by \(x\) | — |
+| `command_filter(magnitude, filter_name)` | Magnitude → \((\lambda_\mathrm{c}, F_\lambda)\) | — |
 
 ### Cut ranges
 
@@ -292,11 +305,20 @@ command_convol(
 )
 ```
 
+| Parameter | Meaning | Default |
+|-----------|---------|---------|
+| `shape` | Kernel type (see below) | `"gaussian"` |
+| `value` | Width parameter (see below); ignored for rot if `d_angstrom` is set | `0` (no-op) |
+| `beta` | Limb-darkening β (rotation only) | `0` |
+| `precision` | Max \|Δflux\| vs original path; `None` / `≤0` → exact | `1e-4` |
+| `allow_fft` | Opt-in FFT on uniform grids (gauss/box only) | `False` |
+| `d_angstrom` | Fixed ROT half-width \(D\) [Å] (WRPLOT-like) | `None` (use vsini) |
+
 | `shape` | `value` meaning |
 |---------|-----------------|
 | `"gauss"` / `"gaussian"` | FWHM [Å] |
 | `"box"` / `"kasten"` | half-width [Å] |
-| `"rot"` / `"rotation"` | **vsini [km/s]** with \(\Delta\lambda \propto \lambda\) (default) |
+| `"rot"` / `"rotation"` | **vsini [km/s]** with \(\Delta\lambda \propto \lambda\) (unless `d_angstrom` is set) |
 
 For WRPLOT-identical rotation (fixed \(\Delta\lambda_\mathrm{max}\) in Å), pass
 `d_angstrom=D` instead of using vsini:
@@ -338,18 +360,20 @@ command_ismline(
 )
 ```
 
-| Parameter | Meaning |
-|-----------|---------|
-| `coldens` | Column density [cm⁻²]; **negative** → absorption |
-| `l0` | Rest wavelength [Å] |
-| `fvalue` | Oscillator strength |
-| `gamm` | Damping constant [s⁻¹] |
-| `atmass` | Atomic mass [amu]; required if `temp > 0` |
-| `vrad` | Radial velocity [km/s] |
-| `temp`, `vturb` | If both ≤ 0 → Lorentz; else Voigt |
-| `cut_ism` | Restrict work to a window (default `True`) |
-| `window` | Half-width [Å] around the shifted line (default 30) |
-| `ism_window` | Optional absolute `(lo, hi)` instead of `±window` |
+| Parameter | Meaning | Default |
+|-----------|---------|---------|
+| `coldens` | Column density [cm⁻²]; **negative** → absorption | — (required) |
+| `l0` | Rest wavelength [Å] | — (required) |
+| `fvalue` | Oscillator strength | — (required) |
+| `gamm` | Damping constant [s⁻¹] | — (required) |
+| `atmass` | Atomic mass [amu]; required if `temp > 0` | `None` |
+| `vrad` | Radial velocity [km/s] | `0.0` |
+| `temp` | Temperature [K]; with `vturb`, selects Voigt vs Lorentz | `-273.15` |
+| `vturb` | Turbulent velocity [km/s] | `0.0` |
+| `cut_ism` | Restrict work to a wavelength window | `True` |
+| `window` | Half-width [Å] around the shifted line | `30.0` |
+| `ism_window` | Absolute `(lo, hi)` instead of `±window` | `None` |
+| `info` | Print Fortran-style status messages | `False` |
 
 Input: linear wavelength [Å] and linear flux. The grid may be refined near the
 line.
@@ -384,14 +408,19 @@ command_hlymana(
 )
 ```
 
-| Parameter | Meaning |
-|-----------|---------|
-| `key` | `"coldens"` or `"ebv"` |
-| `value` | Column density [cm⁻²] (typically negative for absorption), or \(E(B-V)\) if `key="ebv"` |
-| `vrad` | Radial velocity [km/s] |
-| `temp`, `vturb` | If set (`temp > -1` or `vturb > 0`), use Voigt cores; else Lorentz (Groenewegen & Lamers) |
-| `cut_lyman` | Process only `lyman_window` (default `True`) |
-| `lyman_window` | Wavelength window [Å], shifted with `vrad` |
+| Parameter | Meaning | Default |
+|-----------|---------|---------|
+| `key` | `"coldens"` or `"ebv"` | `"coldens"` |
+| `value` | Column density [cm⁻²] (typically negative for absorption), or \(E(B-V)\) if `key="ebv"` | `-1` |
+| `vrad` | Radial velocity [km/s] | `0` |
+| `temp` | Temperature [K]; `temp > -1` enables thermal Doppler | `-1` |
+| `vturb` | Turbulent velocity [km/s]; `> 0` adds Doppler broadening | `0` |
+| `info` | Print status messages | `False` |
+| `cut_lyman` | Process only `lyman_window` | `True` |
+| `lyman_window` | Wavelength window [Å], shifted with `vrad` | `(900.0, 1300.0)` |
+
+If `temp ≤ -1` and `vturb ≤ 0`, Lorentz (Groenewegen & Lamers) profiles are used;
+otherwise Voigt cores.
 
 Input: wavelength [Å], **linear** flux. Wavelength axis must be monotonic
 (sorted if needed).
@@ -415,12 +444,13 @@ Apply extinction laws to a spectrum stored in **log** wavelength and **log** flu
 command_reddening(dataset, ebv, law="seaton", Rv=-1, info=False)
 ```
 
-| Parameter | Meaning |
-|-----------|---------|
-| `dataset` | `[log10(λ/Å), log10(flux)]` |
-| `ebv` | Colour excess \(E(B-V)\) |
-| `law` | `seaton`, `cardelli`, `fitzpatrick`, `lmc`, `smc`, `smc_bar` |
-| `Rv` | Optional \(R_V\) where the law allows (Cardelli, Fitzpatrick, SMC); `-1` → law default |
+| Parameter | Meaning | Default |
+|-----------|---------|---------|
+| `dataset` | `[log10(λ/Å), log10(flux)]` | — (required) |
+| `ebv` | Colour excess \(E(B-V)\) | — (required) |
+| `law` | `seaton`, `cardelli`, `fitzpatrick`, `lmc`, `smc`, `smc_bar` | `"seaton"` |
+| `Rv` | Optional \(R_V\) where the law allows (Cardelli, Fitzpatrick, SMC) | `-1` (law default) |
+| `info` | Kept for API compatibility | `False` |
 
 Short inputs are expanded toward ≥1000 points (largest-gap midpoints), matching
 WRPLOT behaviour.
@@ -453,20 +483,23 @@ plot_idents(
 )
 ```
 
-| Parameter | Meaning |
-|-----------|---------|
-| `file` | Path to an idents file |
-| `id_xoff` | Global extra x-offset [data units] |
-| `id_y`, `id_len` | Default mark base and length (y units) |
-| `id_horizontal` | Horizontal text if `True` (else vertical) |
-| `color` | Default mark/text color |
-| `bbox_alpha` | White text background opacity |
-| `color_line_from_text` | Mark colour follows first `&n` in the label |
-| `auto` | Place marks above local spectrum (needs a Line2D on the axes) |
-| `auto_offset` | Clearance above spectrum when `auto=True` (default 0.2) |
-| `auto_window` | Half-width in \(x\) for local stats (default 0.5) |
-| `auto_min` | Optional floor for `id_y` when `auto=True` |
-| `fixed` | Force kwargs `id_y`/`id_len`; ignore file `\IDY`/`\IDLENG` |
+| Parameter | Meaning | Default |
+|-----------|---------|---------|
+| `file` | Path to an idents file | — (required) |
+| `id_xoff` | Global extra x-offset [data units] | `0` |
+| `id_y` | Mark base height (y units); ignored if `auto=True` | `1.05` |
+| `id_len` | Mark length (y units) | `0.05` |
+| `id_fontsize` | Label font size | `12` |
+| `id_linesize` | Mark line width | `0.75` |
+| `id_horizontal` | Horizontal text if `True` (else vertical) | `False` |
+| `color` | Default mark/text color | `"black"` |
+| `bbox_alpha` | White text background opacity | `0` |
+| `color_line_from_text` | Mark colour follows first `&n` in the label | `False` |
+| `auto` | Place marks above local spectrum (needs a Line2D on the axes) | `False` |
+| `auto_offset` | Clearance above spectrum when `auto=True` | `0.2` |
+| `auto_window` | Half-width in \(x\) for local stats | `None` → `0.5` |
+| `auto_min` | Optional floor for `id_y` when `auto=True` | `None` |
+| `fixed` | Force kwargs `id_y`/`id_len`; ignore file `\IDY`/`\IDLENG` | `False` |
 
 `auto` and `fixed` are mutually exclusive.
 
@@ -528,14 +561,14 @@ colours). Kept for comparison; prefer `plot_idents`.
 
 ## 12. Helper functions
 
-| Method | Purpose |
-|--------|---------|
-| `gauss(x, mu=0, sigma=1)` | Normalised Gaussian samples |
-| `box(x, mu=0, width=1)` | Box kernel (not normalised to 1) |
-| `rot(x, mu=0, d_angstrom=0, beta=0)` | Unsoeld rotation kernel weights |
-| `voigth(a, v)` | Normalised Voigt \(H(a,v)\) (Köster / WRPLOT) |
-| `is_float(element)` | Parse helper |
-| `warmup_kernels()` | Module-level: compile Numba kernels once |
+| Method | Purpose | Defaults |
+|--------|---------|----------|
+| `gauss(x, mu=…, sigma=…)` | Normalised Gaussian samples | `mu=0`, `sigma=1` |
+| `box(x, mu=…, width=…)` | Box kernel (not normalised to 1) | `mu=0`, `width=1` |
+| `rot(x, mu=…, d_angstrom=…, beta=…)` | Unsoeld rotation kernel weights | `mu=0`, `d_angstrom=0`, `beta=0` |
+| `voigth(a, v)` | Normalised Voigt \(H(a,v)\) (Köster / WRPLOT) | — |
+| `is_float(element)` | Parse helper | — |
+| `warmup_kernels()` | Module-level: compile Numba kernels once | — |
 
 ---
 
