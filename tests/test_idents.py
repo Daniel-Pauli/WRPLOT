@@ -15,7 +15,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from helpers import OUTPUT, REF, get_wrplotter
+from helpers import OUTPUT, REF, get_wrplotter, load_uv
 
 ID_O = REF / "id_O.dat"
 
@@ -182,6 +182,215 @@ class TestIdentsLayout(unittest.TestCase):
         plt.close(fig)
 
 
+class TestIdentsAuto(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.w = get_wrplotter()
+        if not ID_O.is_file():
+            raise unittest.SkipTest(f"missing {ID_O}")
+        cls.uv = load_uv(cls.w)
+
+    def test_auto_requires_spectrum(self):
+        fig, ax = plt.subplots()
+        ax.set_xlim(1000, 1100)
+        ax.set_ylim(0, 1.5)
+        plt.sca(ax)
+        with self.assertRaises(ValueError):
+            self.w.plot_idents(str(ID_O), auto=True)
+        plt.close(fig)
+
+    def test_auto_places_marks_above_local_mean(self):
+        x, y = np.asarray(self.uv[0], float), np.asarray(self.uv[1], float)
+        fig, ax = plt.subplots(figsize=(8, 3), dpi=100)
+        plt.sca(ax)
+        ax.plot(x, y, "k-", lw=0.6)
+        ax.set_xlim(1000, 1100)
+        ymin = float(np.min(y[(x >= 1000) & (x <= 1100)]))
+        ymax = float(np.max(y[(x >= 1000) & (x <= 1100)]))
+        ax.set_ylim(ymin - 0.05, ymax + 0.35)
+        offset = 0.2
+        self.w.plot_idents(
+            str(ID_O),
+            auto=True,
+            auto_offset=offset,
+            id_len=0.06,
+            id_fontsize=8,
+            color_line_from_text=True,
+        )
+        # Mark stems should start above the local continuum (mean + offset),
+        # or higher if neighbour-leveling raised a dip.
+        m = (x >= 1032) & (x <= 1038)
+        local_mean = float(np.mean(y[m]))
+        stem_bottoms = []
+        for ln in ax.lines[1:]:  # skip spectrum
+            xd = np.asarray(ln.get_xdata(), float)
+            yd = np.asarray(ln.get_ydata(), float)
+            if xd.size == 2 and abs(xd[0] - xd[1]) < 1e-6:
+                if abs(xd[0] - 1034.75) < 2.0:
+                    stem_bottoms.append(min(yd))
+        self.assertGreater(len(stem_bottoms), 0, msg="no O VI stems found")
+        for y0 in stem_bottoms:
+            self.assertGreaterEqual(
+                y0, local_mean + 0.5 * offset,
+                msg=f"stem bottom {y0} not above local mean {local_mean}",
+            )
+        self.assertGreater(len(ax.texts), 0)
+        plt.close(fig)
+
+    def test_auto_levels_absorption_dips_to_neighbours(self):
+        """A deep trough should not pull an ident below its neighbours."""
+        anchors = [1030.0, 1050.0, 1070.0]
+        bases = [1.0, 0.1, 1.0]  # middle sits in the trough
+        leveled = self.w._wrplotter__level_auto_bases(anchors, bases)
+        self.assertAlmostEqual(leveled[0], 1.0)
+        self.assertAlmostEqual(leveled[2], 1.0)
+        self.assertAlmostEqual(leveled[1], 1.0)  # raised to neighbour average
+
+    def test_auto_clears_emission_peak(self):
+        """Mark bottom must sit above a sharp emission peak under the ident."""
+        import tempfile
+        wave = np.linspace(1000, 1100, 1001)
+        flux = np.full_like(wave, 0.5)
+        flux[(wave > 1048) & (wave < 1052)] = 2.0
+        with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as fh:
+            fh.write("\\IDENT 1050.0 &ETest\n")
+            path = fh.name
+        try:
+            fig, ax = plt.subplots()
+            plt.sca(ax)
+            ax.plot(wave, flux, "k-")
+            ax.set_xlim(1000, 1100)
+            ax.set_ylim(0, 3.0)
+            offset = 0.2
+            self.w.plot_idents(
+                path, auto=True, auto_offset=offset, auto_window=0.5,
+                id_len=0.05, id_fontsize=8,
+            )
+            stem_bottoms = []
+            for ln in ax.lines[1:]:
+                xd = np.asarray(ln.get_xdata(), float)
+                yd = np.asarray(ln.get_ydata(), float)
+                if xd.size == 2 and abs(xd[0] - xd[1]) < 1e-6 and abs(xd[0] - 1050.0) < 0.5:
+                    stem_bottoms.append(min(yd))
+            self.assertGreater(len(stem_bottoms), 0)
+            for y0 in stem_bottoms:
+                self.assertGreaterEqual(
+                    y0, 2.0 + offset - 1e-6,
+                    msg=f"stem {y0} collides with emission peak at 2.0",
+                )
+            plt.close(fig)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_auto_min_floor(self):
+        """auto_min raises all marks to at least that y."""
+        import tempfile
+        wave = np.linspace(1000, 1100, 201)
+        flux = np.full_like(wave, 0.3)
+        with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as fh:
+            fh.write("\\IDENT 1050.0 &ETest\n")
+            path = fh.name
+        try:
+            fig, ax = plt.subplots()
+            plt.sca(ax)
+            ax.plot(wave, flux, "k-")
+            ax.set_xlim(1000, 1100)
+            ax.set_ylim(0, 2.0)
+            self.w.plot_idents(
+                path, auto=True, auto_offset=0.05, auto_window=0.5,
+                auto_min=1.1, id_len=0.05, id_fontsize=8,
+            )
+            stem_bottoms = []
+            for ln in ax.lines[1:]:
+                xd = np.asarray(ln.get_xdata(), float)
+                yd = np.asarray(ln.get_ydata(), float)
+                if xd.size == 2 and abs(xd[0] - xd[1]) < 1e-6:
+                    stem_bottoms.append(min(yd))
+            self.assertGreater(len(stem_bottoms), 0)
+            for y0 in stem_bottoms:
+                self.assertGreaterEqual(y0, 1.1 - 1e-6)
+            plt.close(fig)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_fixed_ignores_file_idy_idleng(self):
+        """fixed=True uses kwargs id_y/id_len and skips \\IDY/\\IDLENG."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as fh:
+            fh.write("\\IDY 2.0U\n")
+            fh.write("\\IDLENG 0.5U\n")
+            fh.write("\\IDENT 1050.0 &ETest\n")
+            path = fh.name
+        try:
+            fig, ax = plt.subplots()
+            plt.sca(ax)
+            ax.set_xlim(1000, 1100)
+            ax.set_ylim(0, 3.0)
+            ax.plot([1000, 1100], [1, 1], "k-", lw=0.3)
+            self.w.plot_idents(
+                path, fixed=True, id_y=1.05, id_len=0.08, id_fontsize=8,
+            )
+            stem_bottoms, stem_tops = [], []
+            for ln in ax.lines[1:]:
+                xd = np.asarray(ln.get_xdata(), float)
+                yd = np.asarray(ln.get_ydata(), float)
+                if xd.size == 2 and abs(xd[0] - xd[1]) < 1e-6 and abs(xd[0] - 1050) < 1:
+                    stem_bottoms.append(min(yd))
+                    stem_tops.append(max(yd))
+            self.assertGreater(len(stem_bottoms), 0)
+            # Lowest mark piece must start at kwargs id_y (not file \\IDY=2.0)
+            self.assertAlmostEqual(min(stem_bottoms), 1.05, places=5)
+            # Lowest stem top ≈ id_y + a*id_len (a=0.43), not file \\IDLENG=0.5
+            self.assertTrue(
+                any(abs(yt - (1.05 + 0.08 * 0.43)) < 1e-4 for yt in stem_tops)
+            )
+            self.assertFalse(any(abs(yb - 2.0) < 0.05 for yb in stem_bottoms))
+            plt.close(fig)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_fixed_and_auto_raises(self):
+        fig, ax = plt.subplots()
+        plt.sca(ax)
+        ax.set_xlim(1000, 1100)
+        ax.plot([1000, 1100], [1, 1], "k-")
+        with self.assertRaises(ValueError):
+            self.w.plot_idents(str(ID_O), fixed=True, auto=True)
+        plt.close(fig)
+
+
+def _plot_uv_with_auto_idents(xlim, *, auto_offset=0.2, id_len=0.05,
+                              id_fontsize=8, figsize=(10, 4), dpi=120,
+                              title=None):
+    """Plot UV spectrum + auto-placed idents; return (fig, ax)."""
+    w = get_wrplotter()
+    uv = load_uv(w)
+    x, y = np.asarray(uv[0], float), np.asarray(uv[1], float)
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    plt.sca(ax)
+    ax.plot(x, y, color="0.15", lw=0.7)
+    ax.set_xlim(*xlim)
+    m = (x >= xlim[0]) & (x <= xlim[1])
+    ymin = float(np.nanmin(y[m]))
+    ymax = float(np.nanmax(y[m]))
+    pad = 0.08 * max(ymax - ymin, 0.2)
+    ax.set_ylim(ymin - pad, ymax + pad + auto_offset + id_len + 0.35)
+    w.plot_idents(
+        str(ID_O),
+        auto=True,
+        auto_offset=auto_offset,
+        id_len=id_len,
+        id_fontsize=id_fontsize,
+        color_line_from_text=True,
+    )
+    ax.set_xlabel("Wavelength / Å")
+    ax.set_ylabel("Flux")
+    if title:
+        ax.set_title(title, fontsize=10)
+    fig.tight_layout()
+    return fig, ax
+
+
 def make_plots():
     """QC panel: idents under several y-ranges / aspect ratios / sizes."""
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -236,6 +445,23 @@ def make_plots():
     for name, gap_em in gaps:
         status = "OK" if abs(gap_em - TARGET_GAP_EM) < GAP_EM_TOL else "FAIL"
         print(f"    {name:16s}  VI→(is) gap = {gap_em:.3f} em  [{status}]")
+
+    # --- auto placement on UV spectrum ---
+    auto_windows = [
+        ("idents_auto_uv_fuse.png", (920, 1180),
+         "auto idents on UV spectrum (FUSE)"),
+        ("idents_auto_uv_iue.png", (1150, 1600),
+         "auto idents on UV spectrum (IUE)"),
+        ("idents_auto_uv_zoom_ovi.png", (1020, 1050),
+         "auto idents zoom (O VI region)"),
+    ]
+    for fname, xlim, title in auto_windows:
+        fig_a, _ax_a = _plot_uv_with_auto_idents(
+            xlim, auto_offset=0.2, id_len=0.05, id_fontsize=8, title=title,
+        )
+        fig_a.savefig(OUTPUT / fname, dpi=130, bbox_inches="tight")
+        plt.close(fig_a)
+        print(f"  wrote {fname}")
 
 
 if __name__ == "__main__":

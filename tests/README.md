@@ -50,5 +50,6 @@ From the repo root (needs the same Python env as `wrplot.py`, e.g. anaconda):
   plus `output/reddening_timing.txt`.
 - IDENTS (`plot_idents`) uses `ref/id_O.dat`. A full `run_all.py` or
   `run_all.py --plots-only` regenerates `output/idents_smoke.png`,
-  `output/idents_geometry_matrix.png`, and `output/idents_*.png` (one per
-  figure size / ylim). `--unit-only` skips those figure updates.
+  `output/idents_geometry_matrix.png`, `output/idents_*.png` (geometry),
+  and `output/idents_auto_uv_*.png` (`auto=True` on the UV spectrum).
+  `--unit-only` skips those figure updates.
