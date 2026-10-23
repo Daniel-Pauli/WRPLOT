@@ -15,13 +15,10 @@ cd "$TESTS_DIR"
 mkdir -p ref data output
 
 if [[ -z "${PATH_WRPLOT:-}" ]]; then
-  if [[ -d /home/daniel/wrplot.dir ]]; then
-    export PATH_WRPLOT=/home/daniel/wrplot.dir
-  else
-    echo "ERROR: PATH_WRPLOT is not set and /home/daniel/wrplot.dir not found."
-    echo "Set PATH_WRPLOT to your WRPLOT installation root, then re-run."
-    exit 1
-  fi
+  echo "ERROR: PATH_WRPLOT is not set."
+  echo "Export PATH_WRPLOT to your classic WRPLOT installation root, then re-run."
+  echo "  Example:  export PATH_WRPLOT=/path/to/wrplot.dir"
+  exit 1
 fi
 
 WRPLOT_COM="$PATH_WRPLOT/proc.dir/wrplot.com"

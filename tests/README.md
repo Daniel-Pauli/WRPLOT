@@ -17,9 +17,10 @@ WRPLOT. Tolerance for flux differences vs WRPLOT: **1e-4**.
 
 ## 1. Generate WRPLOT references
 
-Requires a WRPLOT install (`PATH_WRPLOT`, default `/home/daniel/wrplot.dir`):
+Requires a classic WRPLOT install with `PATH_WRPLOT` set:
 
 ```bash
+export PATH_WRPLOT=/path/to/wrplot.dir
 cd tests
 ./run_wrplot_refs.sh
 # equivalent:  wrplot test.plot +
@@ -28,14 +29,18 @@ cd tests
 This creates tables in `ref/` (ISMLINE, ISMLINE+CONVOL, HLYMANA,
 CONVOL gauss/box/rot, and REDDENING for Seaton/Cardelli/Fitzpatrick/LMC/SMC/SMC_BAR).
 
+**You do not need classic WRPLOT to run the Python tests** — the committed
+`ref/` tables are enough.
+
 ## 2. Run Python validation
 
-From the repo root (needs the same Python env as `wrplot.py`, e.g. anaconda):
+From the repo root (Python env with deps from `requirements.txt`):
 
 ```bash
-/home/daniel/anaconda3/bin/python tests/run_all.py
-/home/daniel/anaconda3/bin/python tests/run_all.py --unit-only
-/home/daniel/anaconda3/bin/python tests/run_all.py --plots-only
+pip install -r requirements.txt
+python tests/run_all.py
+python tests/run_all.py --unit-only
+python tests/run_all.py --plots-only
 ```
 
 ## Notes
